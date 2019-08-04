@@ -1,4 +1,4 @@
-from Sampler import *
+from DataProvider import Sampler
 import Rewarder
 import ActionSpace
 
