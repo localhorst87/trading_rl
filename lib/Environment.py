@@ -1,6 +1,8 @@
 from DataProvider import Sampler
 import Rewarder
 import ActionSpace
+import numpy as np
+import pickle
 
 class Environment:
     '''
@@ -48,3 +50,106 @@ class Environment:
         isDone = self.dataset.isLastWindow() or self.actionSpace.noActionsPossible()
 
         return observation, reward, tradingState, isDone
+
+class ReplayMemory:
+    '''
+    Memory of experienced samples. The maximum size of the memory is bound to the given size.
+    Can return a random permutation of samples
+
+    INPUTS:
+        size    (int)       maximum nubmer of samples to collect
+    '''
+
+    def __init__(self, size):
+        self.memory = collections.deque(maxlen = size)
+
+    def save(self, path):
+        ''' saves the memory on the desired path
+
+            IN      path    (string)    relative or absolute file path to save the memory
+        '''
+
+        fileHandler = open(path, 'wb')
+        pickle.dump(self.memory, fileHandler)
+
+    def load(self, path):
+        ''' loads a saved memory from HDD
+
+            IN      path    (string)    relative or absolute file of the saved memory
+        '''
+
+        fileHandler = open(path, 'rb')
+        self.memory = pickle.load(fileHandler)
+
+    def getSamples(self, batchSize):
+        ''' returns random samples of the replay memory.
+            Throws an exception if the number of samples in the memory is smaller than the requested batch size
+
+            IN      batchSize   (int)       number of random samples to return
+        '''
+        if len(self.memory) < batchSize: raise ValueError("Not enough samples to create a batch of the desired size")
+
+        permutation = np.random.permutation( len(self.memory) )[0:batchSize]
+        randomSamples = np.array(self.memory)[permutation]
+
+        return randomSamples.tolist()
+
+    def add(self, sample):
+        ''' adds a sample to the memory. If the memory size is greater than the maximum defined size,
+            the oldest sample will be kicked out
+
+            IN      sample      (Sample)    sample of state, action, reward, next state, done
+        '''
+
+        self.memory.append(sample)
+
+    def _isEmpty(self):
+        ''' returns True if the memory is empty '''
+
+        return len(self.memory) == 0
+
+class Sample:
+    '''
+    wrapper for state, action, reward, next state and done observations from the environment
+    '''
+
+    def __init__(self):
+        self.state = None
+        self._action = None
+        self._reward = None
+        self.nextState = None
+        self._done = None
+
+    @property
+    def action(self):
+        return self._action
+
+    @action.setter
+    def action(self, value):
+        if not isinstance(value, int): raise ValueError("action must be an integer number")
+        self._action = value
+
+    @property
+    def reward(self):
+        return self._reward
+
+    @reward.setter
+    def reward(self, value):
+        if not isinstance(value, (int, float) ): raise ValueError("reward must be numeric")
+        self._reward = value
+
+    @property
+    def done(self):
+        return self._done
+
+    @done.setter
+    def done(self, vaule):
+        if not isinstance(value, bool): raise ValueError("done must be a boolean")
+        self._done = value
+
+    def isSet(self):
+        ''' returns true if at least a state, action and reward are set '''
+
+        isSet = self.state is not None and self.action is not None and self.reward is not None
+
+        return isSet
