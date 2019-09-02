@@ -171,11 +171,16 @@ class Dataset:
 
     def getPosition(self):
         ''' returns the sample number of the dataset where the recent end position of the window is located
-            example after the 1st iteration and window length 5, the index of the windows last point is 4
+            example: after the 1st iteration and window length 5, the index of the windows last point is 4
 
         OUT             (int)      current index of the last windows sample '''
 
         return (self.nIteration - 1) + (self.windowLength - 1)
+
+    def getRemainingSamples(self):
+        ''' returns the number of possible remaining iterations '''
+
+        return (self.length - self.getPosition() - 1)
 
     def isLastWindow(self):
         ''' returns if the window that was returned by the last iteration is the last window in the dataset
