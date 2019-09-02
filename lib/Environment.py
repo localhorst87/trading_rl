@@ -3,6 +3,7 @@ import Rewarder
 import ActionSpace
 import numpy as np
 import pickle
+import collections
 
 class Environment:
     '''
@@ -15,12 +16,12 @@ class Environment:
         windowLength       window length of the dataset we move over the sample
     '''
 
-    def __init__(self, dataPath, windowLength):
+    def __init__(self, dataPath, windowLength, actionSpace, rewarder):
         self.SAMPLE_LENGTH = 720
         self.windowLength = windowLength
         self.sampler = Sampler(dataPath)
-        self.actionSpace = ActionSpace.SeparatedNets()
-        self.rewarder = Rewarder.SeparatedNetsSingleReward()
+        self.actionSpace = actionSpace
+        self.rewarder = rewarder
         self.dataset = None
 
     def reset(self):
