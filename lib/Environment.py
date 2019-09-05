@@ -47,10 +47,10 @@ class Environment:
 
         tradingState = self.actionSpace.do(action)
         reward = self.rewarder.getReward(self.dataset, action)
-        observation = self.dataset.__next__()
+        nextObservation = self.dataset.__next__()
         isDone = self.dataset.isLastWindow() or self.actionSpace.noActionsPossible()
 
-        return observation, reward, tradingState, isDone
+        return nextObservation, reward, tradingState, isDone
 
 class ReplayMemory:
     '''
