@@ -114,11 +114,14 @@ class OpeningAgent(Agent):
         self.minRewardTarget = 0.00
         self.probabilityThreshold = 0.50
         self.randomActionProbability = 0.00
-        self.replayMemory = ReplayMemory(5000)
-        self.batchSize = 32
-        self._learningRate = 1e-3
-        self._stepSizeTraining = 50
-        self._episodeStartTraining = 500
+        self.replayMemory = ReplayMemory(15000)
+        self.batchSize = 128
+        self._learningRate = 1e-4
+        self._stepSizeTraining = 75
+        self._episodeStartTraining = 1000
+        self._networkLstmUnits = 150
+        self._networkSizeFullyConnected1 = 75
+        self._networkSizeFullyConnected2 = 25
         self._environment = environment
         self._minIterationsToOpen = 50 # wait this number of iterations until opening a position will be possible
         self._minSamplesLeft = 100 # abort episode after this number of (or less) remaining samples
@@ -134,7 +137,12 @@ class OpeningAgent(Agent):
 
         input = tf.placeholder(tf.float32, [None, self._nInputs, self.environment.windowLength])
         network = LstmNormalDistribution("observeNet", input, self._nOpeningActions)
+        network.lstmUnits = self._networkLstmUnits
+        network.neuronsFc1 = self._networkSizeFullyConnected1
+        network.neuronsFc2 = self._networkSizeFullyConnected2
+        network.buildNetwork()
         self.networkHandler = NormalDistributionHandler(network, self.session)
+
 
     @Agent._episodeWrapper
     def runEpisode(self):
@@ -472,7 +480,7 @@ class Network(ABC):
         pass
 
     @abstractmethod
-    def _buildNetwork(self):
+    def buildNetwork(self):
         pass
 
 class LstmNormalDistribution(Network):
@@ -491,10 +499,10 @@ class LstmNormalDistribution(Network):
         self._networkName = networkName
         self._input = input
         self._output = None
-        self.lstmUnits = 64
-        self.neuronsFc = 16
+        self.lstmUnits = 128
+        self.neuronsFc1 = 64
+        self.neuronsFc2 = 16
         self._nOutputs = nActions
-        self._buildNetwork()
 
     @property
     def networkName(self):
@@ -528,12 +536,12 @@ class LstmNormalDistribution(Network):
     def nOutputs(self, value):
         pass
 
-    def _buildNetwork(self):
+    def buildNetwork(self):
         ''' creates the graph of the neural network:
 
-              --> FCL --> FCL (mean values of actions)
+              --> FCL --> FCL --> FCL (mean values of actions)
         LSTM
-              --> FCL --> FCL (variance of actions)
+              --> FCL --> FCL --> FCL (variance of actions)
         '''
         with tf.variable_scope(self.networkName) as scope:
 
@@ -546,22 +554,30 @@ class LstmNormalDistribution(Network):
             lastSequenceSample = tf.gather( lstmOutputs, sequenceLength - 1 ) # returns tensor of shape [batchSize, lstmUnits] of the last sequence sample
 
             # divided fully connected Layers
-            weightsInitFcMean = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.lstmUnits + self.neuronsFc) ) )
-            biasInitFcMean = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc) )
-            fcMeanLayer = tf.contrib.layers.fully_connected( lastSequenceSample, num_outputs = self.neuronsFc, weights_initializer = weightsInitFcMean, biases_initializer = biasInitFcMean)
+            weightsInitFcMean1 = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.lstmUnits + self.neuronsFc1) ) )
+            biasInitFcMean1 = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc1) )
+            fcMeanLayer1 = tf.contrib.layers.fully_connected( lastSequenceSample, num_outputs = self.neuronsFc1, weights_initializer = weightsInitFcMean1, biases_initializer = biasInitFcMean1)
 
-            weightsInitFcVariance = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.lstmUnits + self.neuronsFc) ) )
-            biasInitFcVariance = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc) )
-            fcVarianceLayer = tf.contrib.layers.fully_connected( lastSequenceSample, num_outputs = self.neuronsFc, weights_initializer = weightsInitFcVariance, biases_initializer = biasInitFcVariance)
+            weightsInitFcMean2 = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc1 + self.neuronsFc2) ) )
+            biasInitFcMean2 = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc2) )
+            fcMeanLayer2 = tf.contrib.layers.fully_connected( fcMeanLayer1, num_outputs = self.neuronsFc2, weights_initializer = weightsInitFcMean2, biases_initializer = biasInitFcMean2)
+
+            weightsInitFcVariance1 = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.lstmUnits + self.neuronsFc1) ) )
+            biasInitFcVariance1 = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc1) )
+            fcVarianceLayer1 = tf.contrib.layers.fully_connected( lastSequenceSample, num_outputs = self.neuronsFc1, weights_initializer = weightsInitFcVariance1, biases_initializer = biasInitFcVariance1)
+
+            weightsInitFcVariance2 = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc1 + self.neuronsFc2) ) )
+            biasInitFcVariance2 = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc2) )
+            fcVarianceLayer2 = tf.contrib.layers.fully_connected( lastSequenceSample, num_outputs = self.neuronsFc2, weights_initializer = weightsInitFcVariance2, biases_initializer = biasInitFcVariance2)
 
             # output heads for mean and variance
-            weightsInitOutputMean = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc + self.nOutputs) ) )
+            weightsInitOutputMean = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc2 + self.nOutputs) ) )
             biasInitOutputMean = tf.constant_initializer(0)
-            outputMean = tf.contrib.layers.fully_connected( fcMeanLayer, num_outputs = self.nOutputs, activation_fn = None, weights_initializer = weightsInitOutputMean, biases_initializer = biasInitOutputMean)
+            outputMean = tf.contrib.layers.fully_connected( fcMeanLayer2, num_outputs = self.nOutputs, activation_fn = None, weights_initializer = weightsInitOutputMean, biases_initializer = biasInitOutputMean)
 
-            weightsInitOutputVariance = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc + self.nOutputs) ) )
+            weightsInitOutputVariance = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc2 + self.nOutputs) ) )
             biasInitOutputVariance = tf.constant_initializer(0)
-            outputVariance = tf.contrib.layers.fully_connected( fcVarianceLayer, num_outputs = self.nOutputs, activation_fn = tf.sigmoid, weights_initializer = weightsInitOutputVariance, biases_initializer = biasInitOutputVariance)
+            outputVariance = tf.contrib.layers.fully_connected( fcVarianceLayer2, num_outputs = self.nOutputs, activation_fn = tf.sigmoid, weights_initializer = weightsInitOutputVariance, biases_initializer = biasInitOutputVariance)
 
             # wrapped outputs
             self.output = [outputMean, outputVariance]
