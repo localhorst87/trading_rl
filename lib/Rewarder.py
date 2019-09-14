@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 import numpy as np
+import scipy
 
 class Rewarder(ABC):
     '''
@@ -68,9 +69,9 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         self.tradeType = "long"
         self.sampleOpen = self.dataset.getPosition()
         weightedReturns = self._calcWeightedReturns()
-        reward = self._calcRewardFromWeightedReturns(weightedReturns)
+        expectedWeightedReturn = self._calcRewardFromWeightedReturns(weightedReturns)
 
-        return reward
+        return scaledSigmoid(expectedWeightedReturn, min = -1, max = 1, scaleFactor = 0.85)
 
     def _rewardOpenShort(self):
         ''' returns the reward for opening a long position '''
@@ -78,9 +79,9 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         self.tradeType = "short"
         self.sampleOpen = self.dataset.getPosition()
         weightedReturns = self._calcWeightedReturns()
-        reward = self._calcRewardFromWeightedReturns(weightedReturns)
+        expectedWeightedReturn = self._calcRewardFromWeightedReturns(weightedReturns)
 
-        return reward
+        return scaledSigmoid(expectedWeightedReturn, min = -1, max = 1, scaleFactor = 0.85)
 
     def _rewardKeepPosition(self):
         pass
@@ -97,21 +98,21 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         '''
 
         if self.tradeType == "long":
-            price = self.dataset.data["price_ask_close"]
+            filteredPrice = self._getFilteredPrice("price_ask_close")
             typeFactor = 1
         elif self.tradeType == "short":
-            price = self.dataset.data["price_bid_close"]
+            filteredPrice = self._getFilteredPrice("price_bid_close")
             typeFactor = -1
         else:
             raise ValueError("no valid open position existing")
 
         start = self.sampleOpen + 1
         end = start + self.SAMPLES_FORWARD_OBSERVE
-        tradeReturns =  100 * typeFactor * (price[start:end] - price[start]) / price[start] # percentage
+        tradeReturns =  100 * typeFactor * (filteredPrice[start:end] - filteredPrice[start]) / filteredPrice[start] # percentage
 
         timeWeights = self._getTimeWeights( len(tradeReturns) )
         timeWeightedReturns = tradeReturns * timeWeights
-        weightedReturns = [self._scaleWeightFunction(x) for x in timeWeightedReturns.values]
+        weightedReturns = [self._scaleWeightFunction(x) for x in timeWeightedReturns]
 
         return weightedReturns
 
@@ -120,17 +121,15 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
             and minimum values of the weighted returns
 
             IN      weightedReturns     (list)      time and scale weighted returns
-            OUT                         (float)     reward
+            OUT                         (float)     expected weighted return
         '''
 
         minValue = min(weightedReturns)
         maxValue = max(weightedReturns)
-        minPosition = np.argmin(weightedReturns)
-        maxPosition = np.argmax(weightedReturns)
 
         expectedValue = maxValue + minValue
 
-        return scaledSigmoid(expectedValue, min = -1, max = 1, scaleFactor = 0.85)
+        return expectedValue
 
     def _getTimeWeights(self, length):
         ''' calculates time weights for the trade returns. The further away the sample from the
@@ -156,6 +155,20 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         power = 1.4 if tradeReturn >= 0 else 1.8
 
         return np.sign(tradeReturn) * abs(tradeReturn)**power
+
+    def _getFilteredPrice(self, subject):
+        ''' returns a low pass filtered price, according to the given subject.
+            Low pass filtering prevents from overfitting and supports training stability
+
+            IN      subject         (string)        standardized name of available subjects of a data symbol, e.g. "price_ask_open"
+            OUT     priceFiltered   (np.array)      low pass filtered price values
+        '''
+
+        price = self.dataset.data[subject].values
+        b, a = scipy.signal.butter(4, 0.15)
+        priceFiltered = scipy.signal.filtfilt(b, a, price)
+
+        return priceFiltered
 
 class CumulativeWeightedOpeningRewarder(Rewarder):
     '''
