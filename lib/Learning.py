@@ -114,35 +114,28 @@ class OpeningAgent(Agent):
         self.minRewardTarget = 0.00
         self.probabilityThreshold = 0.50
         self.randomActionProbability = 0.00
-        self.replayMemory = ReplayMemory(15000)
-        self.batchSize = 128
+        self.replayMemory = ReplayMemory(10000) # check memory consumption first before setting the length of the replay memory
+        self.batchSize = 256
         self._learningRate = 1e-4
-        self._stepSizeTraining = 75
-        self._episodeStartTraining = 1000
-        self._networkLstmUnits = 150
-        self._networkSizeFullyConnected1 = 75
-        self._networkSizeFullyConnected2 = 25
+        self._stepSizeTraining = 128
+        self._episodeStartTraining = 5000
         self._environment = environment
-        self._minIterationsToOpen = 50 # wait this number of iterations until opening a position will be possible
-        self._minSamplesLeft = 100 # abort episode after this number of (or less) remaining samples
+        self._minIterationsToOpen = 12 # wait this number of iterations until opening a position will be possible
+        self._minSamplesLeft = 78 # abort episode after this number of (or less) remaining samples
         self._possibleActions = self.environment.actionSpace.possibleActions["observe"]
         self._observeAction = self.environment.actionSpace.possibleActions["observe"][0]
         self._openingActions = self.environment.actionSpace.possibleActions["observe"][1:3]
         self._nOpeningActions = len(self._openingActions)
-        self._nInputs = 1 # number of signals as input
+        self._nInputs = 3 # number of signals as input
         self._createNetworks()
 
     def _createNetworks(self):
         ''' creates a networkHandler according to the following configuration '''
 
-        input = tf.placeholder(tf.float32, [None, self._nInputs, self.environment.windowLength])
-        network = LstmNormalDistribution("observeNet", input, self._nOpeningActions)
-        network.lstmUnits = self._networkLstmUnits
-        network.neuronsFc1 = self._networkSizeFullyConnected1
-        network.neuronsFc2 = self._networkSizeFullyConnected2
+        input = tf.placeholder(tf.float32, [None, self._nInputs, self.environment.windowLength, 1])
+        network = CnnTest("observeNet", input, self._nOpeningActions)
         network.buildNetwork()
         self.networkHandler = NormalDistributionHandler(network, self.session)
-
 
     @Agent._episodeWrapper
     def runEpisode(self):
@@ -264,7 +257,7 @@ class OpeningAgent(Agent):
         sample = Sample()
         sample.state = state
         sample.reward = reward
-        sample.action =  actionNumber
+        sample.action = actionNumber
 
         return sample
 
@@ -275,9 +268,16 @@ class OpeningAgent(Agent):
             OUT                     (list)                  states that can be used as an input for the LSTM network
         '''
 
-        priceChange = observation["price_ask_close"].diff().fillna(0).values / observation["price_ask_close"].values
+        macdLineNormed = observation["macd_line"] / observation["stddev"]
+        macdLineNormed = np.expand_dims(macdLineNormed.values, axis = -1)
+        #macdHistogramNormed = observation["macd_histogram"] / observation["stddev"]
+        #macdHistogramNormed = np.expand_dims(macdHistogramNormed.values, axis = -1)
+        adx = (observation["adx"] - 15) / 100
+        adx = np.expand_dims(adx.values, axis = -1)
+        rsi = (observation["rsi"] - 50)/ 100
+        rsi = np.expand_dims(rsi.values, axis = -1)
 
-        return [priceChange]
+        return [macdLineNormed.tolist(), rsi.tolist(), adx.tolist()] # return lists and not numpy arrays as numpy uses an own specified memory allocator. Memory consumption can increase vast then when using replay memories!
 
     def _createBatch(self):
         ''' creates a MonteCarlo batch from the replay memory
@@ -398,6 +398,7 @@ class NormalDistributionHandler(NetworkHandler):
         self.learningRate = tf.placeholder(tf.float32)
         self.actionPerformed = tf.placeholder(tf.int32, shape = (None,) )
         self.reward = tf.placeholder(tf.float32, shape = (None,) )
+        self.meanValues = tf.placeholder(tf.float32, shape = (None, ) )
         self._defineOptimization()
 
     @property
@@ -435,10 +436,10 @@ class NormalDistributionHandler(NetworkHandler):
     def _defineOptimization(self):
         ''' defines the graph for training the network'''
 
-        mean = tf.reduce_sum(self.network.output[0] * tf.one_hot(self.actionPerformed, self.network.nOutputs) )
-        variance = tf.reduce_sum(self.network.output[1] * tf.one_hot(self.actionPerformed, self.network.nOutputs) )
-        self.loss = tf.reduce_mean( 0.5 * ( tf.log(2 * math.pi * variance) + tf.square(self.reward - mean) / variance ) ) # natural log of normal distribution
+        mean = tf.reduce_sum(self.network.output[0] * tf.one_hot(self.actionPerformed, self.network.nOutputs), axis = -1)
+        variance = tf.reduce_sum(self.network.output[1] * tf.one_hot(self.actionPerformed, self.network.nOutputs), axis = -1)
 
+        self.loss = tf.reduce_mean( tf.square(self.reward - mean) / variance + 0.5 * ( tf.log(2 * math.pi * variance)) ) # natural log of normal distribution
         optimizer = tf.train.AdamOptimizer(learning_rate = self.learningRate)
         self.training = optimizer.minimize(self.loss)
 
@@ -483,10 +484,10 @@ class Network(ABC):
     def buildNetwork(self):
         pass
 
-class LstmNormalDistribution(Network):
+class CnnNormalDistribution(Network):
     '''
-    Concrete Network class. Implements a LSTM with two heads of fully connected layers
-    that intends to implement mean and variance values of actions
+    Concrete Network class. Implements a convolutional neural network with two heads
+    of fully connected layers that intends to implement mean and variance values of actions
 
     INPUTS:
         networkName     (string)            name of the network
@@ -499,9 +500,8 @@ class LstmNormalDistribution(Network):
         self._networkName = networkName
         self._input = input
         self._output = None
-        self.lstmUnits = 128
-        self.neuronsFc1 = 64
-        self.neuronsFc2 = 16
+        self.nSamples = int( input.get_shape()[2] )
+        self.nFeatures = int( input.get_shape()[1] )
         self._nOutputs = nActions
 
     @property
@@ -537,47 +537,52 @@ class LstmNormalDistribution(Network):
         pass
 
     def buildNetwork(self):
-        ''' creates the graph of the neural network:
 
-              --> FCL --> FCL --> FCL (mean values of actions)
-        LSTM
-              --> FCL --> FCL --> FCL (variance of actions)
-        '''
         with tf.variable_scope(self.networkName) as scope:
 
-            # LSTM
-            lstmCell = tf.contrib.rnn.LSTMCell(self.lstmUnits)
-            wrappedLstmCell = tf.contrib.rnn.DropoutWrapper(cell = lstmCell, output_keep_prob = 0.92)
-            lstmOutputs, _ = tf.nn.dynamic_rnn(wrappedLstmCell, self.input, dtype = tf.float32)  # shape: [batchSize, sequenceLength, lstmUnits]
-            lstmOutputs = tf.transpose(lstmOutputs, [1, 0, 2]) # shape: [sequenceLength, batchSize, lstmUnits]
-            sequenceLength = int( lstmOutputs.get_shape()[0] )
-            lastSequenceSample = tf.gather( lstmOutputs, sequenceLength - 1 ) # returns tensor of shape [batchSize, lstmUnits] of the last sequence sample
+            # first smooth the data
+            pool0 = tf.layers.average_pooling2d(inputs = self._input, pool_size = [1, 3], strides = (1, 1), padding = "same")
 
-            # divided fully connected Layers
-            weightsInitFcMean1 = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.lstmUnits + self.neuronsFc1) ) )
-            biasInitFcMean1 = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc1) )
-            fcMeanLayer1 = tf.contrib.layers.fully_connected( lastSequenceSample, num_outputs = self.neuronsFc1, weights_initializer = weightsInitFcMean1, biases_initializer = biasInitFcMean1)
+            # convolutional layers for the mean estimation
+            convKernelInit = tf.truncated_normal_initializer(stddev = 0.2)
 
-            weightsInitFcMean2 = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc1 + self.neuronsFc2) ) )
-            biasInitFcMean2 = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc2) )
-            fcMeanLayer2 = tf.contrib.layers.fully_connected( fcMeanLayer1, num_outputs = self.neuronsFc2, weights_initializer = weightsInitFcMean2, biases_initializer = biasInitFcMean2)
+            # mean estimation convolutional layers
+            conv1Mean = tf.layers.conv2d(inputs = pool0, filters = 64, kernel_size = [self.nFeatures, 3], strides = (1, 3), kernel_initializer = convKernelInit)
+            pool1Mean = tf.layers.average_pooling2d(inputs = conv1Mean, pool_size = [1, 3], strides = (1, 1))
+            conv2Mean = tf.layers.conv2d(inputs = pool1Mean, filters = 32, kernel_size = [1, 3], strides = (1, 1), padding = "same", kernel_initializer = convKernelInit)
+            pool2Mean = tf.layers.average_pooling2d(inputs = conv2Mean, pool_size = [1, 2], strides = (1, 1), padding = "same")
 
-            weightsInitFcVariance1 = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.lstmUnits + self.neuronsFc1) ) )
-            biasInitFcVariance1 = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc1) )
-            fcVarianceLayer1 = tf.contrib.layers.fully_connected( lastSequenceSample, num_outputs = self.neuronsFc1, weights_initializer = weightsInitFcVariance1, biases_initializer = biasInitFcVariance1)
+            # configure flattened fully connected layer for mean estimation
+            nSamplesMean = int( pool2Mean.get_shape()[2] )
+            nLayersMean = int( pool2Mean.get_shape()[3] )
+            nNeuronsMean = int( nSamplesMean * nLayersMean )
+            weightsInitFcMean = tf.truncated_normal_initializer(stddev = math.sqrt( 2/(nNeuronsMean + 16) ) )
+            weightsInitOutputMean = tf.truncated_normal_initializer(stddev = 0.4)
 
-            weightsInitFcVariance2 = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc1 + self.neuronsFc2) ) )
-            biasInitFcVariance2 = tf.truncated_normal_initializer( stddev = math.sqrt(2 / self.neuronsFc2) )
-            fcVarianceLayer2 = tf.contrib.layers.fully_connected( lastSequenceSample, num_outputs = self.neuronsFc2, weights_initializer = weightsInitFcVariance2, biases_initializer = biasInitFcVariance2)
+            # mean estimation fully connected layers and output
+            flattenedLayerMean = tf.reshape(pool2Mean, [-1, nNeuronsMean])
+            dropoutLayerMean = tf.layers.dropout(flattenedLayerMean, rate = 0.25)
+            fullyConnectedMean = tf.layers.dense(dropoutLayerMean, units = 16, activation = tf.nn.leaky_relu, kernel_initializer = weightsInitFcMean)
+            outputMean = tf.layers.dense(fullyConnectedMean, units = self.nOutputs, activation = tf.math.tanh, kernel_initializer = weightsInitOutputMean)
 
-            # output heads for mean and variance
-            weightsInitOutputMean = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc2 + self.nOutputs) ) )
-            biasInitOutputMean = tf.constant_initializer(0)
-            outputMean = tf.contrib.layers.fully_connected( fcMeanLayer2, num_outputs = self.nOutputs, activation_fn = None, weights_initializer = weightsInitOutputMean, biases_initializer = biasInitOutputMean)
+            # convolutional layers for the variance estimation
+            conv1Variance = tf.layers.conv2d(inputs = pool0, filters = 64, kernel_size = [self.nFeatures, 4], strides = (1, 4), kernel_initializer = convKernelInit)
+            pool1Variance = tf.layers.average_pooling2d(inputs = conv1Variance, pool_size = [1, 3], strides = (1, 1))
+            conv2Variance = tf.layers.conv2d(inputs = pool1Variance, filters = 32, kernel_size = [1, 3], strides = (1, 1), padding = "same", kernel_initializer = convKernelInit)
+            pool2Variance = tf.layers.average_pooling2d(inputs = conv2Variance, pool_size = [1, 2], strides = (1, 1), padding = "same")
 
-            weightsInitOutputVariance = tf.truncated_normal_initializer( stddev = math.sqrt( 2 / (self.neuronsFc2 + self.nOutputs) ) )
-            biasInitOutputVariance = tf.constant_initializer(0)
-            outputVariance = tf.contrib.layers.fully_connected( fcVarianceLayer2, num_outputs = self.nOutputs, activation_fn = tf.sigmoid, weights_initializer = weightsInitOutputVariance, biases_initializer = biasInitOutputVariance)
+            # configure flattened fully connected layer for variance estimation
+            nSamplesVariance = int( pool2Variance.get_shape()[2] )
+            nLayersVariance = int( pool2Variance.get_shape()[3] )
+            nNeuronsVariance = int( nSamplesVariance * nLayersVariance )
+            weightsInitFcVariance = tf.truncated_normal_initializer(stddev = math.sqrt( 2/(nNeuronsVariance + 16) ) )
+            weightsInitOutputVariance = tf.truncated_normal_initializer(stddev = 0.4)
+
+            # variance estimation fully connected layers and output
+            flattenedLayerVariance = tf.reshape(pool2Variance, [-1, nNeuronsVariance])
+            dropoutLayerVariance = tf.layers.dropout(flattenedLayerVariance, rate = 0.25)
+            fullyConnectedVariance = tf.layers.dense(dropoutLayerVariance, units = 16, activation = tf.nn.leaky_relu, kernel_initializer = weightsInitFcVariance)
+            outputVariance = tf.layers.dense(fullyConnectedVariance, units = self.nOutputs, activation = tf.math.softplus, kernel_initializer = weightsInitOutputVariance)
 
             # wrapped outputs
             self.output = [outputMean, outputVariance]

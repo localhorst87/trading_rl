@@ -56,7 +56,7 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
 
     def __init__(self):
         super().__init__()
-        self.SAMPLES_FORWARD_OBSERVE = 200
+        self.SAMPLES_FORWARD_OBSERVE = 2*78
 
     def _rewardKeepObserving(self):
         ''' returns the reward for observing the market before opening a position '''
