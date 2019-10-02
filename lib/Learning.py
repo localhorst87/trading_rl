@@ -133,7 +133,7 @@ class OpeningAgent(Agent):
         ''' creates a networkHandler according to the following configuration '''
 
         input = tf.placeholder(tf.float32, [None, self._nInputs, self.environment.windowLength, 1])
-        network = CnnTest("observeNet", input, self._nOpeningActions)
+        network = CnnNormalDistribution("observeNet", input, self._nOpeningActions)
         network.buildNetwork()
         self.networkHandler = NormalDistributionHandler(network, self.session)
 
