@@ -259,7 +259,7 @@ class OpeningAgent(Agent):
             OUT     sample  (Sample)    standardized sample of one step
         '''
 
-        actionNumber = self._possibleActions.index(action)
+        actionNumber = self._openingActions.index(action)
 
         sample = Sample()
         sample.state = state
