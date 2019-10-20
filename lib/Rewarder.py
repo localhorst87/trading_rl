@@ -56,7 +56,7 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
 
     def __init__(self):
         super().__init__()
-        self.SAMPLES_FORWARD_OBSERVE = 2*78
+        self.SAMPLES_FORWARD_OBSERVE = 200
 
     def _rewardKeepObserving(self):
         ''' returns the reward for observing the market before opening a position '''
@@ -71,7 +71,7 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         weightedReturns = self._calcWeightedReturns()
         expectedWeightedReturn = self._calcRewardFromWeightedReturns(weightedReturns)
 
-        return scaledSigmoid(expectedWeightedReturn, min = -1, max = 1, scaleFactor = 0.85)
+        return expectedWeightedReturn
 
     def _rewardOpenShort(self):
         ''' returns the reward for opening a long position '''
@@ -81,7 +81,7 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         weightedReturns = self._calcWeightedReturns()
         expectedWeightedReturn = self._calcRewardFromWeightedReturns(weightedReturns)
 
-        return scaledSigmoid(expectedWeightedReturn, min = -1, max = 1, scaleFactor = 0.85)
+        return expectedWeightedReturn
 
     def _rewardKeepPosition(self):
         pass
@@ -90,9 +90,7 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         pass
 
     def _calcWeightedReturns(self):
-        ''' calculates the time and scale weighted price change in percentages relative to the
-            open position. Important: First weighting with the time weights and as second with
-            the scale weights, not vice versa!
+        ''' calculates time weighted price change in percentages relative to the open position.
 
             OUT                 (list)      time and scale weighted returns
         '''
@@ -106,19 +104,18 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         else:
             raise ValueError("no valid open position existing")
 
-        start = self.sampleOpen + 1
+        start = self.sampleOpen
         end = start + self.SAMPLES_FORWARD_OBSERVE
-        tradeReturns =  100 * typeFactor * (filteredPrice[start:end] - filteredPrice[start]) / filteredPrice[start] # percentage
+        tradeReturns =  typeFactor * (filteredPrice[start:end] - filteredPrice[start]) / filteredPrice[start]
 
         timeWeights = self._getTimeWeights( len(tradeReturns) )
         timeWeightedReturns = tradeReturns * timeWeights
-        weightedReturns = [self._scaleWeightFunction(x) for x in timeWeightedReturns]
 
-        return weightedReturns
+        return timeWeightedReturns
 
     def _calcRewardFromWeightedReturns(self, weightedReturns):
-        ''' calculates the reward from the weighted returns using the values of the maximum
-            and minimum values of the weighted returns
+        ''' calculates the reward from the time weighted returns using the values of the maximum
+            and minimum values and scales it with the volatility level
 
             IN      weightedReturns     (list)      time and scale weighted returns
             OUT                         (float)     expected weighted return
@@ -126,8 +123,9 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
 
         minValue = min(weightedReturns)
         maxValue = max(weightedReturns)
+        volatilityLevel = self._getVolatilityLevel()
 
-        expectedValue = maxValue + minValue
+        expectedValue = (maxValue + minValue) / volatilityLevel
 
         return expectedValue
 
@@ -143,19 +141,6 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
 
         return timeWeight[:length]
 
-    def _scaleWeightFunction(self, tradeReturn):
-        ''' calculates the scale weighted trade return of a trade return: Higher values are
-            rewarded with a gaining factor, lower values are damped.
-            The damping and gaining is stronger for negative returns than for positive returns.
-
-            IN      tradeReturn     (float)     trade return
-            OUT                     (float)     scale weighted return
-        '''
-
-        power = 1.4 if tradeReturn >= 0 else 1.8
-
-        return np.sign(tradeReturn) * abs(tradeReturn)**power
-
     def _getFilteredPrice(self, subject):
         ''' returns a low pass filtered price, according to the given subject.
             Low pass filtering prevents from overfitting and supports training stability
@@ -169,6 +154,19 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         priceFiltered = scipy.signal.filtfilt(b, a, price)
 
         return priceFiltered
+
+    def _getVolatilityLevel(self):
+        ''' returns the a level to norm returns over many forex pairs. It's calculated
+            via the mean standard deviation compared to the mean price over the last 480
+            samples. Make sure to ingest these indicator data when using this rewarder!
+
+            OUT             (float)     volatilityLevel
+        '''
+
+        stddev = self.dataset.data["stddev_480"].mean()
+        meanPrice = self.dataset.data["sma_480"].mean()
+
+        return stddev/meanPrice
 
 class CumulativeWeightedOpeningRewarder(Rewarder):
     '''
@@ -184,8 +182,7 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
 
     def __init__(self):
         super().__init__()
-        self.WEIGHT_FACTOR_FORW = 0.99
-        self.WEIGHT_FACTOR_BACK = 0.75
+        self.SAMPLES_FORWARD_OBSERVE = 120
 
     def _rewardKeepObserving(self):
         ''' returns the reward for observing the market before opening a position '''
@@ -198,11 +195,9 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
         self.tradeType = "long"
         self.sampleOpen = self.dataset.getPosition()
 
-        missedReturnPerBar = self._calcMissedReturn(self.WEIGHT_FACTOR_BACK)
-        expectedReturnPerBar = self._calcExpectedReturn(self.WEIGHT_FACTOR_FORW)
-        reward = expectedReturnPerBar - missedReturnPerBar
+        reward = self._calcExpectedReturn() / self._calcVolatilityLevel()
 
-        return scaledSigmoid(reward, min = -1, max = 1, scaleFactor = 13000)
+        return reward
 
     def _rewardOpenShort(self):
         ''' returns the reward for opening a short position '''
@@ -210,11 +205,9 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
         self.tradeType = "short"
         self.sampleOpen = self.dataset.getPosition()
 
-        missedReturnPerBar = self._calcMissedReturn(self.WEIGHT_FACTOR_BACK)
-        expectedReturnPerBar = self._calcExpectedReturn(self.WEIGHT_FACTOR_FORW)
-        reward = expectedReturnPerBar - missedReturnPerBar
+        reward = self._calcExpectedReturn() / self._calcVolatilityLevel()
 
-        return scaledSigmoid(reward, min = -1, max = 1, scaleFactor = 13000)
+        return reward
 
     def _rewardKeepPosition(self):
         pass
@@ -222,35 +215,33 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
     def _rewardClosePosition(self):
         pass
 
-    def _calcMissedReturn(self, weightFactor):
-        ''' calculates the missed return When opening a position. The missed
-        return is the return that you missed for waiting too long - so actually
-        the difference to the local minimum(long) / maximum(short) before opening
-        the position.
+    def _getTimeWeights(self, length):
+        ''' calculates time weights for the trade returns. The further away the sample from the
+            opening position the lower the weight factor
 
-        Here the missed return is calculated as a weighted return: The farther
-        away the sample, the less it contributes to the missed return. The value
-        for the missed return is always greater or equals zero.
+            IN      length      (int)       length of the weightedReturns
+            OUT                 (list)
+        '''
 
-        OUT         (float)         weighted missed return '''
+        timeWeight = [scaledSigmoid(x, scaleFactor = 0.75) for x in np.linspace(5, -5, self.SAMPLES_FORWARD_OBSERVE)]
 
-        if self.tradeType == "long":
-            price = self.dataset.data["price_ask_close"]
-            typeFactor = 1
-        elif self.tradeType == "short":
-            price = self.dataset.data["price_bid_close"]
-            typeFactor = -1
-        else:
-            raise ValueError("no valid open position existing")
+        return timeWeight[:length]
 
-        missedReturns = [(price[i] - price[i-1]) / price[i-1] for i in range(self.sampleOpen, self.dataset.windowLength - 1, -1)]
-        cumulativeWeightedMissedReturn = sum( [missedReturns[i] * weightFactor**i for i in range( len(missedReturns) )] )
-        weightsSum = sum( [weightFactor**i for i in range( len(missedReturns) )] )
-        missedReturnPerBar = max(0, typeFactor * cumulativeWeightedMissedReturn / weightsSum)
+    def _getFilteredPrice(self, subject):
+        ''' returns a low pass filtered price, according to the given subject.
+            Low pass filtering prevents from overfitting and supports training stability
 
-        return missedReturnPerBar
+            IN      subject         (string)        standardized name of available subjects of a data symbol, e.g. "price_ask_open"
+            OUT     priceFiltered   (np.array)      low pass filtered price values
+        '''
 
-    def _calcExpectedReturn(self, weightFactor):
+        price = self.dataset.data[subject].values
+        b, a = scipy.signal.butter(4, 0.15)
+        priceFiltered = scipy.signal.filtfilt(b, a, price)
+
+        return priceFiltered
+
+    def _calcExpectedReturn(self):
         ''' calculates the expected return after opening a position. The expected
         return does take in account the future developement of the price. It is
         weighted according to the distance of the opening bar. So if the price
@@ -260,20 +251,35 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
         OUT         (float)         weighed expected return '''
 
         if self.tradeType == "long":
-            price = self.dataset.data["price_ask_close"]
+            filteredPrice = self._getFilteredPrice("price_ask_close")
             typeFactor = 1
         elif self.tradeType == "short":
-            price = self.dataset.data["price_bid_close"]
+            filteredPrice = self._getFilteredPrice("price_bid_close")
             typeFactor = -1
         else:
             raise ValueError("no valid open position existing")
 
-        futureReturns = [(price[i] - price[i-1]) / price[i-1] for i in range(self.sampleOpen + 1, self.dataset.length)]
-        cumulativeWeightedReturn = sum( [futureReturns[i] * weightFactor**i for i in range( len(futureReturns) )] )
-        weightSum = sum( [weightFactor**i for i in range( len(futureReturns) )] )
-        expectedReturnPerBar = typeFactor * cumulativeWeightedReturn / weightSum
+        start = self.sampleOpen + 1
+        end = start + self.SAMPLES_FORWARD_OBSERVE
 
-        return expectedReturnPerBar
+        futureReturns = [typeFactor * (filteredPrice[i] - filteredPrice[i-1]) / filteredPrice[i-1] for i in range(start, end)]
+        timeWeights = self._getTimeWeights( len(futureReturns) )
+        expectedReturn = sum( [futureReturns[i] * timeWeights[i] for i in range( len(futureReturns) )] )
+
+        return expectedReturn
+
+    def _calcVolatilityLevel(self):
+        ''' returns the a level to norm returns over many forex pairs. It's calculated
+            via the mean standard deviation compared to the mean price over the last 480
+            samples. Make sure to ingest these indicator data when using this rewarder!
+
+            OUT             (float)     volatilityLevel
+        '''
+
+        stddev = self.dataset.data["stddev_480"].mean()
+        meanPrice = self.dataset.data["sma_480"].mean()
+
+        return stddev/meanPrice
 
 def scaledSigmoid(x, **kwargs):
     ''' using a scaled sigmoid function to clip a value between a defined minimum

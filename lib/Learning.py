@@ -114,14 +114,14 @@ class OpeningAgent(Agent):
         self.minRewardTarget = 0.00
         self.probabilityThreshold = 0.50
         self.randomActionProbability = 0.00
-        self.replayMemory = ReplayMemory(10000) # check memory consumption first before setting the length of the replay memory
-        self.batchSize = 256
-        self._learningRate = 1e-4
-        self._stepSizeTraining = 128
-        self._episodeStartTraining = 5000
+        self.replayMemory = ReplayMemory(50000) # check memory consumption first before setting the length of the replay memory
+        self.batchSize = 1000
+        self._learningRate = 1e-3
+        self._stepSizeTraining = 250
+        self._episodeStartTraining = 10000
         self._environment = environment
-        self._minIterationsToOpen = 12 # wait this number of iterations until opening a position will be possible
-        self._minSamplesLeft = 78 # abort episode after this number of (or less) remaining samples
+        self._minIterationsToOpen = 0 # wait this number of iterations until opening a position will be possible
+        self._minSamplesLeft = 200 # abort episode after this number of (or less) remaining samples
         self._possibleActions = self.environment.actionSpace.possibleActions["observe"]
         self._observeAction = self.environment.actionSpace.possibleActions["observe"][0]
         self._openingActions = self.environment.actionSpace.possibleActions["observe"][1:3]
@@ -268,16 +268,14 @@ class OpeningAgent(Agent):
             OUT                     (list)                  states that can be used as an input for the LSTM network
         '''
 
-        macdLineNormed = observation["macd_line"] / observation["stddev"]
-        macdLineNormed = np.expand_dims(macdLineNormed.values, axis = -1)
-        #macdHistogramNormed = observation["macd_histogram"] / observation["stddev"]
-        #macdHistogramNormed = np.expand_dims(macdHistogramNormed.values, axis = -1)
-        adx = (observation["adx"] - 15) / 100
-        adx = np.expand_dims(adx.values, axis = -1)
-        rsi = (observation["rsi"] - 50)/ 100
-        rsi = np.expand_dims(rsi.values, axis = -1)
+        macdLineFast = 100 * (observation["sma_6"]-observation["sma_18"]) / observation["sma_480"]
+        macdLineFast = np.expand_dims(macdLineFast.values, axis = -1).tolist()
+        macdLineMedium = 100 * (observation["sma_12"]-observation["sma_36"]) / observation["sma_480"]
+        macdLineMedium = np.expand_dims(macdLineMedium.values, axis = -1).tolist()
+        macdLineSlow = 100 * (observation["sma_36"]-observation["sma_84"]) / observation["sma_480"]
+        macdLineSlow = np.expand_dims(macdLineSlow.values, axis = -1).tolist()
 
-        return [macdLineNormed.tolist(), rsi.tolist(), adx.tolist()] # return lists and not numpy arrays as numpy uses an own specified memory allocator. Memory consumption can increase vast then when using replay memories!
+        return [macdLineFast, macdLineMedium, macdLineSlow] # return lists and not numpy arrays as numpy uses an own specified memory allocator. Memory consumption can increase vast then when using replay memories!
 
     def _createBatch(self):
         ''' creates a MonteCarlo batch from the replay memory
@@ -547,10 +545,10 @@ class CnnNormalDistribution(Network):
             convKernelInit = tf.truncated_normal_initializer(stddev = 0.2)
 
             # mean estimation convolutional layers
-            conv1Mean = tf.layers.conv2d(inputs = pool0, filters = 64, kernel_size = [self.nFeatures, 3], strides = (1, 3), kernel_initializer = convKernelInit)
-            pool1Mean = tf.layers.average_pooling2d(inputs = conv1Mean, pool_size = [1, 3], strides = (1, 1))
-            conv2Mean = tf.layers.conv2d(inputs = pool1Mean, filters = 32, kernel_size = [1, 3], strides = (1, 1), padding = "same", kernel_initializer = convKernelInit)
-            pool2Mean = tf.layers.average_pooling2d(inputs = conv2Mean, pool_size = [1, 2], strides = (1, 1), padding = "same")
+            conv1Mean = tf.layers.conv2d(inputs = pool0, filters = 16, kernel_size = [self.nFeatures, 1], strides = (1, 1), kernel_initializer = convKernelInit)
+            pool1Mean = tf.layers.average_pooling2d(inputs = conv1Mean, pool_size = [1, 3], strides = (1, 1), padding = "same")
+            conv2Mean = tf.layers.conv2d(inputs = pool1Mean, filters = 4, kernel_size = [1, 3], strides = (1, 1), padding = "same", kernel_initializer = convKernelInit)
+            pool2Mean = tf.layers.average_pooling2d(inputs = conv2Mean, pool_size = [1, 3], strides = (1, 1), padding = "same")
 
             # configure flattened fully connected layer for mean estimation
             nSamplesMean = int( pool2Mean.get_shape()[2] )
@@ -561,15 +559,15 @@ class CnnNormalDistribution(Network):
 
             # mean estimation fully connected layers and output
             flattenedLayerMean = tf.reshape(pool2Mean, [-1, nNeuronsMean])
-            dropoutLayerMean = tf.layers.dropout(flattenedLayerMean, rate = 0.25)
+            dropoutLayerMean = tf.layers.dropout(flattenedLayerMean, rate = 0.20)
             fullyConnectedMean = tf.layers.dense(dropoutLayerMean, units = 16, activation = tf.nn.leaky_relu, kernel_initializer = weightsInitFcMean)
-            outputMean = tf.layers.dense(fullyConnectedMean, units = self.nOutputs, activation = tf.math.tanh, kernel_initializer = weightsInitOutputMean)
+            outputMean = tf.layers.dense(fullyConnectedMean, units = self.nOutputs, activation = None, kernel_initializer = weightsInitOutputMean)
 
             # convolutional layers for the variance estimation
-            conv1Variance = tf.layers.conv2d(inputs = pool0, filters = 64, kernel_size = [self.nFeatures, 4], strides = (1, 4), kernel_initializer = convKernelInit)
+            conv1Variance = tf.layers.conv2d(inputs = pool0, filters = 16, kernel_size = [self.nFeatures, 1], strides = (1, 1), kernel_initializer = convKernelInit)
             pool1Variance = tf.layers.average_pooling2d(inputs = conv1Variance, pool_size = [1, 3], strides = (1, 1))
-            conv2Variance = tf.layers.conv2d(inputs = pool1Variance, filters = 32, kernel_size = [1, 3], strides = (1, 1), padding = "same", kernel_initializer = convKernelInit)
-            pool2Variance = tf.layers.average_pooling2d(inputs = conv2Variance, pool_size = [1, 2], strides = (1, 1), padding = "same")
+            conv2Variance = tf.layers.conv2d(inputs = pool1Variance, filters = 4, kernel_size = [1, 3], strides = (1, 1), padding = "same", kernel_initializer = convKernelInit)
+            pool2Variance = tf.layers.average_pooling2d(inputs = conv2Variance, pool_size = [1, 3], strides = (1, 1), padding = "same")
 
             # configure flattened fully connected layer for variance estimation
             nSamplesVariance = int( pool2Variance.get_shape()[2] )
@@ -580,7 +578,7 @@ class CnnNormalDistribution(Network):
 
             # variance estimation fully connected layers and output
             flattenedLayerVariance = tf.reshape(pool2Variance, [-1, nNeuronsVariance])
-            dropoutLayerVariance = tf.layers.dropout(flattenedLayerVariance, rate = 0.25)
+            dropoutLayerVariance = tf.layers.dropout(flattenedLayerVariance, rate = 0.15)
             fullyConnectedVariance = tf.layers.dense(dropoutLayerVariance, units = 16, activation = tf.nn.leaky_relu, kernel_initializer = weightsInitFcVariance)
             outputVariance = tf.layers.dense(fullyConnectedVariance, units = self.nOutputs, activation = tf.math.softplus, kernel_initializer = weightsInitOutputVariance)
 
