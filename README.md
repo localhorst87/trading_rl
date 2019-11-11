@@ -1,6 +1,8 @@
 # trading_rl
 The project contains a complete environment and agent to use Deep Reinforcement Learning for trading. The environment uses the Quant Connect API in Python 3
 
+I always try to develope clean code and architecture that is readable for someone else. I do NOT use line breaks in my code as modern editors of IDEs can do it better for you...
+
 `Data Ingestion / Creating datasets`
 
 For data ingestion please make sure to install the LEAN environment first (https://github.com/QuantConnect/Lean). After installing LEAN and its dependencies, copy the QuantDataLoder notebook into your Lean/Launcher/bin/Debug directory and follow my documentation to create a Dataset object. 
