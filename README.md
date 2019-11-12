@@ -23,6 +23,6 @@ Due to training stability reasons, the function to optimize is not the Gaussian 
 
 With the estimation of the mean and variance you can calculate the probability to gain a reward of more than 0 with the help of the cumulative distribution
 
-![win probability](https://latex.codecogs.com/svg.latex?P_{win}&space;=&space;\frac{1}{2}&space;(1&space;&plus;&space;erf(\frac{-\mu}{\sqrt{2\sigma^2}})))
+![win probability](https://latex.codecogs.com/svg.latex?P_{win}&space;=1-&space;\frac{1}{2}&space;(1&space;&plus;&space;erf(\frac{-\mu}{\sqrt{2\sigma^2}})))
 
 The reward is calculated with a cumulative weighted sum of each win per bar, beginning from the opening bar to an amount of bars in the future. The closer the bar to the opening, the heigher the weight...
