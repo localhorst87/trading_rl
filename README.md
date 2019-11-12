@@ -17,12 +17,12 @@ To open a position I try to approximize a Gaussian distribution (https://en.wiki
 Technically a number of previous bars of normalized MACD values is forwarded to a CNN followed by fully connected layers. The output of the network is a mean value (from -1 to 1) and a variance value.
 Due to training stability reasons, the function to optimize is not the Gaussian Normal Distribution itself, but the natural logarithm of it:
 
-![loss function](https://latex.codecogs.com/svg.latex?L&space;=&space;\frac{r-\mu}{\sigma^2}&space;&plus;&space;\frac{1}{2}\cdot&space;log(2\pi\sigma^2))
+![loss function](https://latex.codecogs.com/svg.latex?L&space;=&space;\frac{(r-\mu)^2}{\sigma^2}&space;&plus;&space;\frac{1}{2}\cdot&space;log(2\pi\sigma^2))
 
-![loss derivatives](https://latex.codecogs.com/svg.latex?\frac{\partial&space;L}{\partial&space;\mu}=-\frac{1}{\sigma^2}&space;,&space;\frac{\partial&space;L}{\partial&space;\sigma^2}=\frac{1}{2\sigma^2}-\frac{r-\mu}{\sigma^4})
+![loss derivatives](https://latex.codecogs.com/svg.latex?\frac{\partial&space;L}{\partial&space;\mu}=-\frac{2(r-\mu)}{\sigma^2}&space;,&space;\frac{\partial&space;L}{\partial&space;\sigma^2}=\frac{1}{2\sigma^2}-\frac{r-\mu}{\sigma^4})
 
 With the estimation of the mean and variance you can calculate the probability to gain a reward of more than 0 with the help of the cumulative distribution
 
 ![win probability](https://latex.codecogs.com/svg.latex?P_{win}&space;=&space;\frac{1}{2}&space;(1&space;&plus;&space;erf(\frac{-\mu}{\sqrt{2\sigma^2}})))
 
-The reward is calculated with a cumulative weighted sum of each win per bar, beginning from the opening bar to an amount of bars in the future. The closer the bar to the opening, the heigher the weight.
+The reward is calculated with a cumulative weighted sum of each win per bar, beginning from the opening bar to an amount of bars in the future. The closer the bar to the opening, the heigher the weight...
