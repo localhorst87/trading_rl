@@ -18,7 +18,7 @@ class Environment:
 
     def __init__(self, dataPath, windowLength, actionSpace, rewarder):
         self.SAMPLE_LENGTH = 720
-        self.windowLength = windowLength
+        self._windowLength = windowLength # never set self._windowLength during the iteration, only self.windowLength, as it will call the method to adjust the dataset
         self.sampler = Sampler(dataPath)
         self.actionSpace = actionSpace
         self.rewarder = rewarder
@@ -51,6 +51,15 @@ class Environment:
         isDone = self.dataset.isLastWindow() or self.actionSpace.noActionsPossible()
 
         return nextObservation, reward, tradingState, isDone
+
+    @property
+    def windowLength(self):
+        return self._windowLength
+
+    @windowLength.setter
+    def windowLength(self, value):
+        self._windowLength = value
+        self.dataset.changeWindowLength(value)
 
 class ReplayMemory:
     '''
@@ -87,6 +96,7 @@ class ReplayMemory:
             Throws an exception if the number of samples in the memory is smaller than the requested batch size
 
             IN      batchSize   (int)       number of random samples to return
+            OUT                 (list)      random sample list
         '''
         if len(self.memory) < batchSize: raise ValueError("Not enough samples to create a batch of the desired size")
 
@@ -104,10 +114,18 @@ class ReplayMemory:
 
         self.memory.append(sample)
 
+    def getLength(self):
+        ''' returns the number of samples of the replay memory
+
+            OUT         (int)       number of samples
+        '''
+
+        return len(self.memory)
+
     def _isEmpty(self):
         ''' returns True if the memory is empty '''
 
-        return len(self.memory) == 0
+        return self.getLength() == 0
 
 class Sample:
     '''
@@ -144,7 +162,7 @@ class Sample:
         return self._done
 
     @done.setter
-    def done(self, vaule):
+    def done(self, value):
         if not isinstance(value, bool): raise ValueError("done must be a boolean")
         self._done = value
 
