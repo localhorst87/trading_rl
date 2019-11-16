@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from Environment import *
+from NeuralNetworks import *
 import math
 import tensorflow as tf
 import pickle
@@ -19,7 +20,10 @@ class Agent(ABC):
 
     def __init__(self):
         super().__init__()
-        self.session = tf.Session()
+        self.graph = tf.Graph()
+        self.session = tf.Session(graph = self.graph)
+        self.trainable = True
+        self.loadModelPath = None
         self.episode = 0
 
     def __del__(self):
@@ -32,18 +36,33 @@ class Agent(ABC):
 
         def decoratorWrapper(self):
 
-            if self.episode == 0: tf.global_variables_initializer().run(session = self.session)
+            if self.episode == 0:
+                if self.loadModelPath is None:
+                    with self.networkHandler.graph.as_default(): tf.global_variables_initializer().run(session = self.session) # init variables
+                else:
+                    self.networkHandler.load(self.loadModelPath) # load variables
 
-            reward, action = runEpisodeFunc(self) # here the episode itself is performed
+            try:
+                reward, lastAction = runEpisodeFunc(self) # here the episode itself is performed
+
+            except KeyboardInterrupt:
+                raise
+
+            '''except:
+                print("error occured")
+                reward = None
+                lastAction = None'''
 
             self.episode += 1
-            if self.episode % self.stepSizeTraining == 0 and self.episode >= self.episodeStartTraining:
+
+            if self.trainable and self.trainingActive and self.episode % self.stepSizeTraining == 0:
                 batch = self._createBatch()
-                loss = self.networkHandler.train(batch, self.learningRate)
+                additionalParameters = self._getAdditionalTrainParameters()
+                loss = self.networkHandler.train(batch, self.learningRate, **additionalParameters)
             else:
                 loss = None
 
-            return reward, action, loss
+            return reward, lastAction, loss
 
         return decoratorWrapper
 
@@ -76,7 +95,7 @@ class Agent(ABC):
         pass
 
     @property
-    def episodeStartTraining(self):
+    def trainingActive(self):
         pass
 
     @property
@@ -91,9 +110,9 @@ class OpeningAgent(Agent):
         the total control over the risk of opening a position by setting a risk threshold (defined by the property
         probabilityThreshold).
 
-        The OpeningAgent uses sequence data that is forwarded to a LSTM network with fully connected layers.
+        The OpeningAgent uses sequence data that is forwarded to a convolutional neural network with fully connected layers.
         It follows a stricty value based and deterministic policy. The training is performed via MonteCarlo
-        sampling from a replay memory, as it does not uses policy gradients.
+        sampling from a replay memory, as it does not use policy gradients.
 
         INPUTS:
             environment             (Environment)   The environment to sample and receive rewards from
@@ -101,7 +120,7 @@ class OpeningAgent(Agent):
         CONFIGURABLE PROPERTIES:
             batchSize               (int)           number of episodes inside a single training batch
             learningRate            (float)         learning Rate for training
-            stepSizeTraining        (int)           intervall of episodes each time a training will be executed
+            stepSistepSizeTraining  (int)           intervall of episodes each time a training will be executed
             episodeStartTraining    (int)           number of episodes to wait until the first training
             randomActionProbability (float)         [0...1] chance of executing a random action instead of using the network
             minRewardTarget         (float)         [0...1] target reward for creating the success probabilities
@@ -114,14 +133,15 @@ class OpeningAgent(Agent):
         self.minRewardTarget = 0.00
         self.probabilityThreshold = 0.50
         self.randomActionProbability = 0.00
-        self.replayMemory = ReplayMemory(50000) # check memory consumption first before setting the length of the replay memory
+        self.replayMemory = ReplayMemory(10000) # check memory consumption first before setting the length of the replay memory
         self.batchSize = 1000
         self._learningRate = 1e-3
         self._stepSizeTraining = 250
-        self._episodeStartTraining = 10000
+        self.episodeStartTraining = 10000
+        self._trainingActive = False
         self._environment = environment
         self._minIterationsToOpen = 0 # wait this number of iterations until opening a position will be possible
-        self._minSamplesLeft = 200 # abort episode after this number of (or less) remaining samples
+        self._minStepsLeft = 200 # abort episode after this number of (or less) remaining datapoints
         self._possibleActions = self.environment.actionSpace.possibleActions["observe"]
         self._observeAction = self.environment.actionSpace.possibleActions["observe"][0]
         self._openingActions = self.environment.actionSpace.possibleActions["observe"][1:3]
@@ -132,41 +152,38 @@ class OpeningAgent(Agent):
     def _createNetworks(self):
         ''' creates a networkHandler according to the following configuration '''
 
-        input = tf.placeholder(tf.float32, [None, self._nInputs, self.environment.windowLength, 1])
-        network = CnnNormalDistribution("observeNet", input, self._nOpeningActions)
-        network.buildNetwork()
-        self.networkHandler = NormalDistributionHandler(network, self.session)
+        inputShape = [None, self._nInputs, self.environment.windowLength, 1]
+        network = CnnNormalDistribution("observeNet", inputShape, self._nOpeningActions)
+        self.networkHandler = NormalDistributionHandler(network, self.session, self.graph)
 
     @Agent._episodeWrapper
     def runEpisode(self):
         ''' executes exactly one single episode '''
 
-        try:
-            observation = self.environment.reset()
-            state = self._createInput(observation)
-            tradingState = "observe"
+        if self.episode >= self.episodeStartTraining: self.trainingActive = True
 
-            while tradingState == "observe" and self.environment.dataset.getRemainingSamples() > self._minSamplesLeft:
+        observation = self.environment.reset()
+        state = self._createInput(observation)
+        tradingState = "observe"
 
-                action = self._getAction(state) # action string, e.g. "keep_observing"
-                nextObservation, reward, tradingState, _ = self.environment.step(action)
-                nextState = self._createInput(nextObservation)
+        while tradingState == "observe" and self.environment.dataset.getRemainingSteps() > self._minStepsLeft:
 
-                if action != self._observeAction:
-                    sample = self._createSample(state, action, reward)
-                    self.replayMemory.add(sample)
+            action = self._getAction(state) # action string, e.g. "keep_observing"
+            nextObservation, reward, tradingState, _ = self.environment.step(action)
+            nextState = self._createInput(nextObservation)
 
-                state = nextState
+            if action != self._observeAction and self.trainable:
+                sample = self._createSample(state, action, reward)
+                self.replayMemory.add(sample)
 
-        except KeyboardInterrupt:
-            raise
-
-        except:
-            print("error occured")
-            reward = 0
-            action = "keep_observing"
+            state = nextState
 
         return reward, action
+
+    def _getAdditionalTrainParameters(self):
+        ''' no additional parameters needed. Returns an empty (keyword argument) dictionary '''
+
+        return dict()
 
     def _getAction(self, state):
         ''' returns the action to perform according to an epsilon greedy strategy as the agent
@@ -243,13 +260,14 @@ class OpeningAgent(Agent):
 
         return np.squeeze(meanEstimation), np.squeeze(varianceEstimation)
 
+
     def _createSample(self, state, action, reward):
         ''' creates a Sample of the last observation
 
-            IN      state   (list)      state vectors before action returned by the environment
-            IN      action  (string)    action expression of the performed action
-            IN      reward  (float)     last reward returned by the environment
-            OUT     sample  (Sample)    standardized sample of one step
+            IN      state           (list)      state vectors before action, transformed from the raw environmental observation
+            IN      action          (string)    action expression of the performed action
+            IN      reward          (float)     last reward returned by the environment
+            OUT     sample          (Sample)    standardized sample of one step
         '''
 
         actionNumber = self._openingActions.index(action)
@@ -332,258 +350,322 @@ class OpeningAgent(Agent):
     def stepSizeTraining(self, value):
         self._stepSizeTraining = value
 
-class NetworkHandler(ABC):
-    '''
-    The NetworkHandler is an abstract class for the handling of neural networks.
+    @property
+    def trainingActive(self):
+        return self._trainingActive
 
-    It defines the optimization and performs the training of a network.
+    @trainingActive.setter
+    def trainingActive(self, value):
+        self._trainingActive = value
+
+class ClosingAgent(Agent):
+    ''' Concrete Agent for estimating when to close a position.
+
+        The ClosingAgent uses sequence data that is forwarded to a CNN with fully connected layers.
+        It follows a stricty value based and deterministic policy. The training is performed via MonteCarlo
+        sampling from a replay memory, as it does not uses policy gradients.
+
+        INPUTS:
+            environment             (Environment)   The environment to sample and receive rewards from
+
+        CONFIGURABLE PROPERTIES:
+            learningRate            (float)         learning Rate for training
+            discountFactor          (float)         (0...1) discount factor for calculating the Q value
+            minStepsKeepPosition    (int)           number of steps the position will be kept at least
+
     '''
 
-    def __init__(self):
+    def __init__(self, environment):
         super().__init__()
+        self._learningRate = 1e-3
+        self.discountFactor = 0.95
+        self.replayMemory = ReplayMemory(10000) # use preprocessed samples only (this is on-policy)
+        self.batchSize = 256
+        self._stepSizeTraining = 20
+        self._tradeType = None
+        self._trainingActive = False
+        self.strategy = "deterministic"
+        self.probabilityThreshold = 0.60
+        self._environment = environment # important: This is a reference, so one environment can be used sequentially in an opening and closing agent
+        self._minStepsLeft = 1 # abort episode after this number of (or less) remaining steps to close the position
+        self.minStepsKeepPosition = 5 # wait at least this number of steps until closing a position
+        self._possibleActions = self.environment.actionSpace.possibleActions["open_position"]
+        self._nClosingActions = len(self._possibleActions)
+        self._episodeSamples = []
+        self._nInputs = 2 # number of signals as input
+        self._createNetworks()
+
+    def _createNetworks(self):
+        ''' creates the networkHandler for opening and closing network according to the following configuration.
+            Opening network is created to not have a totally random configuration for the closing agent of opened
+            positions.
+        '''
+
+        inputShape = [None, self._nInputs, self.environment.windowLength]
+        network = LstmA2C("positionNet", inputShape, self._nClosingActions)
+        self.networkHandler = A2CHandler(network, self.session, self.graph)
+
+    @Agent._episodeWrapper
+    def runEpisode(self):
+        ''' executes exactly one single episode '''
+
+        if self.replayMemory.getLength() >= self.batchSize: self.trainingActive = True
+
+        self._setTradeTypeNumber() # sets the identifier of the current trade type (0 = long, 1 = short)
+        observation = self.environment.dataset.getCurrentWindow()
+        state = self._createInput(observation)
+        tradingState = "open_position"
+        self._episodeSamples = []
+
+        while tradingState == "open_position" and self.environment.dataset.getRemainingSteps() > self._minStepsLeft:
+
+            action = self._getAction(state, self.strategy) # action string ("keep_position" or "close_position")
+            nextObservation, reward, tradingState, isDone = self.environment.step(action)
+            nextState = self._createInput(nextObservation)
+
+            sample = self._createSample(state, action, nextState, reward, isDone)
+            self._episodeSamples.append(sample)
+
+            state = nextState
+
+        if len(self._episodeSamples) > 0: self._preprocessSamples()
+
+        if tradingState == "closed_position":
+            returnOnInvest = self.environment.rewarder.getReturnOfInvest()
+            lastAction = action
+        else:
+            returnOnInvest = None
+            lastAction = None
+
+        return returnOnInvest, lastAction
+
+    def _getAdditionalTrainParameters(self):
+        ''' sets the trade type as an additional parameter for the training.
+
+            OUT     additionalParameters    (dict)      (keyword argument) dictionary with additional parameters for training of the agent
+        '''
+
+        additionalParameters = {"tradeType": self._tradeType}
+
+        return additionalParameters
+
+    def _setTradeTypeNumber(self):
+        ''' sets the trade type number (0 for long, 1 for short). This is important as the long
+            and short closing network is architectually separated, so we need to know which network
+            output to use for training!
+        '''
+
+        tradeTypeList = ["long", "short"]
+        currentTradeType = self.environment.rewarder.tradeType
+
+        self._tradeType = tradeTypeList.index(currentTradeType)
+
+    def _getAction(self, state, strategy = "stochastic"):
+        ''' returns the action to perform according to the given strategy:
+            "stochastic": decide on given probabilities. "deterministic": take action with higher probability
+
+            IN      state       (list)      state input vectors for the network
+            IN      strategy    (string)    deterministic or non-deterministic strategy
+            OUT     action      (string)    action expression of the chosen action
+        '''
+
+        holdTime = self.environment.dataset.getPosition() - self.environment.rewarder.positionOpen
+
+        if holdTime < self.minStepsKeepPosition:
+            action = "keep_position"
+        elif strategy == "stochastic":
+            action = self._getActionByProbability(state)
+        elif strategy == "deterministic":
+            action = self._getBestAction(state)
+        else:
+            raise ValueError("unknown strategy")
+
+        return action
+
+    def _getActionByProbability(self, state):
+        ''' returns the best action according to the probabilities outputs of network
+
+            IN      state       (list)      state input vectors for the network
+            OUT     action      (string)    action expression of the best action
+        '''
+
+        actorProbs, _ = self._getEstimation(state)
+        actionArray = np.random.choice(self._possibleActions, 1, p = actorProbs) # returns a numpy array
+        action = actionArray[0] # extracts the action string from the array
+
+        return action
+
+    def _getBestAction(self, state):
+        ''' returns the best action according to the probabilities outputs of network
+
+            IN      state       (list)      state input vectors for the network
+            OUT     action      (string)    action expression of the best action
+        '''
+
+        actorProbs, _ = self._getEstimation(state)
+        bestAction = np.argmax(actorProbs)
+        action = self._possibleActions[bestAction]
+
+        if action == "close_position" and actorProbs[bestAction] >= self.probabilityThreshold:
+            action = "close_position"
+        else:
+            action = "keep_position"
+
+        return action
+
+    def _getEstimation(self, state):
+        ''' returns the estimation of actor and critic of the current state
+
+            IN      state               (list)      state vectors from environment
+            OUT     actorProbs          (list)      estimated probabilities for keep_position and close_position
+            OUT     criticValue         (list)      estimated critic value for this state
+        '''
+
+        networkPrediction = self.networkHandler.predict(self.session, state)
+        actorProbs = networkPrediction[0][self._tradeType]
+        criticValue = networkPrediction[1][self._tradeType]
+
+        return np.squeeze(actorProbs), np.squeeze(criticValue)
+
+    def _createSample(self, state, action, nextState, reward, done):
+        ''' creates a Sample of the last observation
+
+            IN      state           (list)      state vectors before action, transformed from the raw environmental observation
+            IN      action          (string)    action expression of the performed action
+            IN      nextState       (list)      next state vectors after action, transformed from the raw environmental observation
+            IN      reward          (float)     last reward returned by the environment
+            IN      done            (bool)      indicates if the state AFTER performing the action is terminal or not
+            OUT     sample          (Sample)    standardized sample of one step
+        '''
+
+        actionNumber = self._possibleActions.index(action)
+
+        sample = Sample()
+        sample.state = state
+        sample.nextState = nextState
+        sample.reward = reward
+        sample.action = actionNumber
+        sample.done = done
+
+        return sample
+
+    def _createInput(self, observation):
+        ''' creates an network input ("state") of the observation from the environment
+
+            IN      observation     (Pandas.Dataframe)      observation of the environment
+            OUT                     (list)                  states that can be used as an input for the LSTM network
+        '''
+
+        windowLength = self.environment.dataset.windowLength
+
+        if windowLength > self.episode + 1: # use only the data points after opening the position!
+            nPoints = self.episode + 1
+        else:
+            nPoints = windowLength
+
+        rsi = (observation["rsi_18"][windowLength-nPoints:] - 50) / 100
+        rsi = self._smoothData(rsi, 3)
+        rsi = rsi.values.tolist()
+
+        macdLine = 100 * (observation["sma_12"][:nPoints] - observation["sma_36"][:nPoints]) / observation["sma_480"][:nPoints]
+        macdLine= self._smoothData(macdLine, 3)
+        macdLine= macdLine.values.tolist()
+
+        # fill the rest of the data points with None values
+        filler = [None] * (windowLength-nPoints)
+        rsi.extend(filler)
+        macdLine.extend(filler)
+
+        return [rsi, macdLine] # return lists and not numpy arrays as numpy uses an own specified memory allocator. Memory consumption can increase vast then when using replay memories!
+
+    def _smoothData(self, dataframe, averageSize):
+        ''' smoothes the data in the dataframe according to a moving average and keeps the original data size
+
+            IN  dataframe       (pandas.dataframe)      the dataframe with the data to smooth
+            IN  averageSize     (int)                   the size of the rolling window
+            OUT                 (pandas.dataframe)      smoothed dataframe
+        '''
+
+        return dataframe.rolling(averageSize, min_periods = 1 , center = True).mean()
+
+    def _preprocessSamples(self):
+        ''' prepares the reversed Q value calculation for training '''
+
+        lastSample = self._episodeSamples[-1]
+
+        if lastSample.done:
+            qValue = 0
+        else:
+            _, criticValueForecast = self._getEstimation(lastSample.nextState)
+            qValue = criticValueForecast
+
+        for sample in reversed(self._episodeSamples):
+            qValue = sample.reward + self.discountFactor * qValue # start from the last sample and estimate Q value by reverse sampling the action history
+            sample.reward = qValue # save Q value in the reward field of the sample
+            self.replayMemory.add(sample)
+
+    def _createBatch(self):
+        ''' creates a MonteCarlo batch from the replay memory
+
+            OUT     (Batch)     batch of the size specified in the properties
+        '''
+
+        batch = Batch(self.batchSize)
+        randomSamples = self.replayMemory.getSamples(self.batchSize)
+
+        for sample in randomSamples:
+            if not batch.isFull(): batch.add(sample)
+            else: break
+
+        return batch
 
     @property
-    def session(self):
-        pass
+    def environment(self):
+        return self._environment
+
+    @environment.setter
+    def environment(self, value):
+        self._environment = value
 
     @property
-    def network(self):
-        pass
+    def networkHandler(self):
+        return self._networkHandler
+
+    @networkHandler.setter
+    def networkHandler(self, value):
+        self._networkHandler = value
 
     @property
-    def loss(self):
-        pass
+    def learningRate(self):
+        return self._learningRate
+
+    @learningRate.setter
+    def learningRate(self, value):
+        self._learningRate = value
 
     @property
-    def training(self):
-        pass
+    def episodeStartTraining(self):
+        return self._episodeStartTraining
 
-    @abstractmethod
-    def train(self, batch, learningRate):
-        pass
-
-    def predict(self, session, input):
-        ''' returns the prediction of the neural network with the given input
-
-        IN      session     (tf.Session)    tensorflow session
-        IN      input       (list)          input that fulfills the input placeholder
-        OUT                 (list)          prediction of the neural network '''
-
-        return session.run(self.network.output, feed_dict = {self.network.input:[input]} )
-
-    def save(self, path):
-        saver = tf.train.Saver()
-        saver.save(self.session, path)
-
-    def load(self, path):
-        saver = tf.train.Saver()
-        saver.restore(self.session, path)
-
-class NormalDistributionHandler(NetworkHandler):
-    '''
-    Training of a network that outputs a normal distribution (mean value and variance of actions)
-
-    INPUTS:
-        network           neural network to train
-    '''
-
-    def __init__(self, network, session):
-        super().__init__()
-        self._session = session
-        self._network = network
-        self._loss = None
-        self._training = None
-        self.learningRate = tf.placeholder(tf.float32)
-        self.actionPerformed = tf.placeholder(tf.int32, shape = (None,) )
-        self.reward = tf.placeholder(tf.float32, shape = (None,) )
-        self.meanValues = tf.placeholder(tf.float32, shape = (None, ) )
-        self._defineOptimization()
+    @episodeStartTraining.setter
+    def episodeStartTraining(self, value):
+        self._episodeStartTraining = value
 
     @property
-    def session(self):
-        return self._session
+    def stepSizeTraining(self):
+        return self._stepSizeTraining
 
-    @session.setter
-    def session(self, value):
-        self._session = value
-
-    @property
-    def network(self):
-        return self._network
-
-    @network.setter
-    def network(self, value):
-        pass
+    @stepSizeTraining.setter
+    def stepSizeTraining(self, value):
+        self._stepSizeTraining = value
 
     @property
-    def loss(self):
-        return self._loss
+    def trainingActive(self):
+        return self._trainingActive
 
-    @loss.setter
-    def loss(self, value):
-        self._loss = value
-
-    @property
-    def training(self):
-        return self._training
-
-    @training.setter
-    def training(self, value):
-        self._training = value
-
-    def _defineOptimization(self):
-        ''' defines the graph for training the network'''
-
-        mean = tf.reduce_sum(self.network.output[0] * tf.one_hot(self.actionPerformed, self.network.nOutputs), axis = -1)
-        variance = tf.reduce_sum(self.network.output[1] * tf.one_hot(self.actionPerformed, self.network.nOutputs), axis = -1)
-
-        self.loss = tf.reduce_mean( tf.square(self.reward - mean) / variance + 0.5 * ( tf.log(2 * math.pi * variance)) ) # natural log of normal distribution
-        optimizer = tf.train.AdamOptimizer(learning_rate = self.learningRate)
-        self.training = optimizer.minimize(self.loss)
-
-    def train(self, batch, learningRate):
-        ''' performs the training of the network according to the defined optimization
-
-            IN      batch           (Batch)     batch of state, action, reward and next state samples
-            IN      learningRate    (float)     learning rate for training the network
-            OUT                     (float)     loss of the recent training step '''
-
-        trainingLoss, _ = self.session.run( [self.loss, self.training], feed_dict = {self.network.input:batch.states, self.actionPerformed:batch.actions, self.reward:batch.rewards, self.learningRate:learningRate} )
-
-        return trainingLoss
-
-class Network(ABC):
-    '''
-    Interface for any kind of neural network
-
-    Inside the concrete classes the graph of the neural network is created
-    '''
-
-    def __init__(self):
-        super().__init__()
-
-    @property
-    def networkName(self):
-        pass
-
-    @property
-    def input(self):
-        pass
-
-    @property
-    def output(self):
-        pass
-
-    @property
-    def nOutputs(self):
-        pass
-
-    @abstractmethod
-    def buildNetwork(self):
-        pass
-
-class CnnNormalDistribution(Network):
-    '''
-    Concrete Network class. Implements a convolutional neural network with two heads
-    of fully connected layers that intends to implement mean and variance values of actions
-
-    INPUTS:
-        networkName     (string)            name of the network
-        input           (tf.placeholder)    tensorflow placeholder for network inputs
-        nActions        (int)               number of all actions
-    '''
-
-    def __init__(self, networkName, input, nActions):
-        super().__init__()
-        self._networkName = networkName
-        self._input = input
-        self._output = None
-        self.nSamples = int( input.get_shape()[2] )
-        self.nFeatures = int( input.get_shape()[1] )
-        self._nOutputs = nActions
-
-    @property
-    def networkName(self):
-        return self._networkName
-
-    @networkName.setter
-    def networkName(self, value):
-        pass
-
-    @property
-    def input(self):
-        return self._input
-
-    @input.setter
-    def input(self, value):
-        pass
-
-    @property
-    def output(self):
-        return self._output
-
-    @output.setter
-    def output(self, value):
-        self._output = value
-
-    @property
-    def nOutputs(self):
-        return self._nOutputs
-
-    @nOutputs.setter
-    def nOutputs(self, value):
-        pass
-
-    def buildNetwork(self):
-
-        with tf.variable_scope(self.networkName) as scope:
-
-            # first smooth the data
-            pool0 = tf.layers.average_pooling2d(inputs = self._input, pool_size = [1, 3], strides = (1, 1), padding = "same")
-
-            # convolutional layers for the mean estimation
-            convKernelInit = tf.truncated_normal_initializer(stddev = 0.2)
-
-            # mean estimation convolutional layers
-            conv1Mean = tf.layers.conv2d(inputs = pool0, filters = 16, kernel_size = [self.nFeatures, 1], strides = (1, 1), kernel_initializer = convKernelInit)
-            pool1Mean = tf.layers.average_pooling2d(inputs = conv1Mean, pool_size = [1, 3], strides = (1, 1), padding = "same")
-            conv2Mean = tf.layers.conv2d(inputs = pool1Mean, filters = 4, kernel_size = [1, 3], strides = (1, 1), padding = "same", kernel_initializer = convKernelInit)
-            pool2Mean = tf.layers.average_pooling2d(inputs = conv2Mean, pool_size = [1, 3], strides = (1, 1), padding = "same")
-
-            # configure flattened fully connected layer for mean estimation
-            nSamplesMean = int( pool2Mean.get_shape()[2] )
-            nLayersMean = int( pool2Mean.get_shape()[3] )
-            nNeuronsMean = int( nSamplesMean * nLayersMean )
-            weightsInitFcMean = tf.truncated_normal_initializer(stddev = math.sqrt( 2/(nNeuronsMean + 16) ) )
-            weightsInitOutputMean = tf.truncated_normal_initializer(stddev = 0.4)
-
-            # mean estimation fully connected layers and output
-            flattenedLayerMean = tf.reshape(pool2Mean, [-1, nNeuronsMean])
-            dropoutLayerMean = tf.layers.dropout(flattenedLayerMean, rate = 0.20)
-            fullyConnectedMean = tf.layers.dense(dropoutLayerMean, units = 16, activation = tf.nn.leaky_relu, kernel_initializer = weightsInitFcMean)
-            outputMean = tf.layers.dense(fullyConnectedMean, units = self.nOutputs, activation = None, kernel_initializer = weightsInitOutputMean)
-
-            # convolutional layers for the variance estimation
-            conv1Variance = tf.layers.conv2d(inputs = pool0, filters = 16, kernel_size = [self.nFeatures, 1], strides = (1, 1), kernel_initializer = convKernelInit)
-            pool1Variance = tf.layers.average_pooling2d(inputs = conv1Variance, pool_size = [1, 3], strides = (1, 1))
-            conv2Variance = tf.layers.conv2d(inputs = pool1Variance, filters = 4, kernel_size = [1, 3], strides = (1, 1), padding = "same", kernel_initializer = convKernelInit)
-            pool2Variance = tf.layers.average_pooling2d(inputs = conv2Variance, pool_size = [1, 3], strides = (1, 1), padding = "same")
-
-            # configure flattened fully connected layer for variance estimation
-            nSamplesVariance = int( pool2Variance.get_shape()[2] )
-            nLayersVariance = int( pool2Variance.get_shape()[3] )
-            nNeuronsVariance = int( nSamplesVariance * nLayersVariance )
-            weightsInitFcVariance = tf.truncated_normal_initializer(stddev = math.sqrt( 2/(nNeuronsVariance + 16) ) )
-            weightsInitOutputVariance = tf.truncated_normal_initializer(stddev = 0.4)
-
-            # variance estimation fully connected layers and output
-            flattenedLayerVariance = tf.reshape(pool2Variance, [-1, nNeuronsVariance])
-            dropoutLayerVariance = tf.layers.dropout(flattenedLayerVariance, rate = 0.15)
-            fullyConnectedVariance = tf.layers.dense(dropoutLayerVariance, units = 16, activation = tf.nn.leaky_relu, kernel_initializer = weightsInitFcVariance)
-            outputVariance = tf.layers.dense(fullyConnectedVariance, units = self.nOutputs, activation = tf.math.softplus, kernel_initializer = weightsInitOutputVariance)
-
-            # wrapped outputs
-            self.output = [outputMean, outputVariance]
+    @trainingActive.setter
+    def trainingActive(self, value):
+        self._trainingActive = value
 
 class Batch:
     '''
@@ -593,7 +675,7 @@ class Batch:
         size    (int)       size of the batch
     '''
 
-    def __init__(self, size):
+    def __init__(self, size = -1):
         self.size = size
         self.states = []
         self.actions = []
@@ -620,7 +702,7 @@ class Batch:
 
         OUT         (bool)      returns True if the number of entries is equal to the defined batch size '''
 
-        if len(self.actions) >= self.size:
+        if len(self.actions) >= self.size and self.size != -1:
             return True
         else:
             return False
