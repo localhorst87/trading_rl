@@ -9,7 +9,7 @@ class Sampler:
     '''
     The Sampler class is used for returning randomized snippets of financial data.
 
-    The getRandomDataset method returns data of 1000 samples of a random data symbol for a random date
+    The getRandomDataset method returns a Dataset object of a random data symbol for a random date
     according to the date boundaries. The windowLength determines the window length of the returned dataset.
 
     INPUTS:
@@ -26,21 +26,21 @@ class Sampler:
         self.subjectList = []
         self._load(dataPath)
 
-    def getRandomDataset(self, windowLength, sampleLength):
+    def getRandomDataset(self, windowLength, datasetLength):
         ''' creates a dataset of the loaded data of random date
 
         IN      windowLength    (integer)   defines the length of the window the dataset should return each iteration step
         OUT                     (Dataset)   a random Dataset of with the given parameters '''
 
-        if windowLength >= sampleLength: raise ValueError("window length must be smaller than the sampe length")
+        if windowLength >= datasetLength: raise ValueError("window length must be smaller than the dataset length")
 
         dataComplete = False
 
         while not dataComplete:
             forexSymbol = self._getRandomTradingSymbol()
             datetimeEnd = self._getRandomDatetime()
-            dataframeCut = self._cutDataframe(self.data[forexSymbol], datetimeEnd, sampleLength) # cuts data by length
-            if len(dataframeCut) < sampleLength or dataframeCut.isnull().values.any(): continue # price data not complete, try another sample
+            dataframeCut = self._cutDataframe(self.data[forexSymbol], datetimeEnd, datasetLength) # cuts data by length
+            if len(dataframeCut) < datasetLength or dataframeCut.isnull().values.any(): continue # price data not complete, try another dataset
 
             dataComplete = True
 
@@ -124,14 +124,14 @@ class Sampler:
 
 class Dataset:
     '''
-    The Dataset class is a wrapper for a data sample. It loops the data by returning
+    The Dataset class is a wrapper for a data snippet. It loops the data by returning
     a window of the last observed datapoints.
     Every step we iterate over the dataset the window is shifting one datapoint forward.
 
     Dataframes are expected to be consisting of standardized pandas series
 
     INPUTS:
-        dataframe       the complete pandas.dataframe sample of one trading data symbol
+        dataframe       the complete pandas.dataframe of one trading data symbol
         windowLength    the length of the moving window
     '''
 
@@ -152,10 +152,35 @@ class Dataset:
         ''' performs iteration step. each iteration step we move the windows of obtained data one data point forward
             the first iteration returns the first window (no window forward shifting yet!)
 
-            OUT         (pandas.dataframe)      dataframe window of the current iteration'''
+            OUT    currentWindow       (pandas.dataframe)      dataframe window of the current iteration
+        '''
 
         self.nIteration += 1
         if self.getPosition() == self.length: raise StopIteration
+
+        currentWindow = self.getCurrentWindow()
+
+        return currentWindow
+
+    def changeWindowLength(self, newLength):
+        ''' changes the window size during the iteration, if possible
+
+            IN      newLength       (int)       new window length
+        '''
+
+        if type(newLength) is not int: raise TypeError("new length must be of type integer")
+
+        currentPosition = self.getPosition()
+        if currentPosition < newLength - 1: raise ValueError("Conversion not possible. There are only %i data points in the past, %i required" % (currentPosition + 1, newLength) )
+
+        self.nIteration = currentPosition - newLength + 2
+        self.windowLength = newLength
+
+    def getCurrentWindow(self):
+        ''' returns the data of the current window
+
+            OUT         (pandas.dataframe)      dataframe window of the current iteration
+        '''
 
         start = self.nIteration - 1
         end = start + self.windowLength
@@ -170,14 +195,14 @@ class Dataset:
         return self.data.columns.to_list()
 
     def getPosition(self):
-        ''' returns the sample number of the dataset where the recent end position of the window is located
+        ''' returns the position number of the dataset where the recent end position of the window is located
             example: after the 1st iteration and window length 5, the index of the windows last point is 4
 
-        OUT             (int)      current index of the last windows sample '''
+        OUT             (int)      current index of the last windows position '''
 
         return (self.nIteration - 1) + (self.windowLength - 1)
 
-    def getRemainingSamples(self):
+    def getRemainingSteps(self):
         ''' returns the number of possible remaining iterations '''
 
         return (self.length - self.getPosition() - 1)
