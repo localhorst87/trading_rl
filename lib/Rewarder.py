@@ -16,8 +16,8 @@ class Rewarder(ABC):
         super().__init__()
         self.dataset = None
         self.tradeType = None # "long" / "short"
-        self.sampleOpen = None
-        self.sampleClose = None
+        self.positionOpen = None
+        self.positionClose = None
         self.rewardFunctionMap = {"keep_observing":self._rewardKeepObserving, "open_long":self._rewardOpenLong, "open_short":self._rewardOpenShort, "keep_position":self._rewardKeepPosition, "close_position":self._rewardClosePosition}
 
     def reset(self):
@@ -25,8 +25,8 @@ class Rewarder(ABC):
 
         self.dataset = None
         self.tradeType = None
-        self.sampleOpen = None
-        self.sampleClose = None
+        self.positionOpen = None
+        self.positionClose = None
 
     def getReward(self, dataset, action):
         ''' returns the reward of the given action. The correct method for the
@@ -67,7 +67,7 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         ''' returns the reward for opening a long position '''
 
         self.tradeType = "long"
-        self.sampleOpen = self.dataset.getPosition()
+        self.positionOpen = self.dataset.getPosition()
         weightedReturns = self._calcWeightedReturns()
         expectedWeightedReturn = self._calcRewardFromWeightedReturns(weightedReturns)
 
@@ -77,7 +77,7 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         ''' returns the reward for opening a long position '''
 
         self.tradeType = "short"
-        self.sampleOpen = self.dataset.getPosition()
+        self.positionOpen = self.dataset.getPosition()
         weightedReturns = self._calcWeightedReturns()
         expectedWeightedReturn = self._calcRewardFromWeightedReturns(weightedReturns)
 
@@ -104,7 +104,7 @@ class WeightedMaxMinOpeningRewarder(Rewarder):
         else:
             raise ValueError("no valid open position existing")
 
-        start = self.sampleOpen
+        start = self.positionOpen
         end = start + self.SAMPLES_FORWARD_OBSERVE
         tradeReturns =  typeFactor * (filteredPrice[start:end] - filteredPrice[start]) / filteredPrice[start]
 
@@ -176,8 +176,6 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
     position are rewarded with 0.
 
     This Rewarder provides rewards for training of an opening agent only.
-    The reward for opening a position is calculated via cumulative weighted price
-    changes of future prices and weighted missed return.
     '''
 
     def __init__(self):
@@ -193,7 +191,7 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
         ''' returns the reward for opening a long position '''
 
         self.tradeType = "long"
-        self.sampleOpen = self.dataset.getPosition()
+        self.positionOpen = self.dataset.getPosition()
 
         reward = self._calcExpectedReturn() / self._calcVolatilityLevel()
 
@@ -203,7 +201,7 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
         ''' returns the reward for opening a short position '''
 
         self.tradeType = "short"
-        self.sampleOpen = self.dataset.getPosition()
+        self.positionOpen = self.dataset.getPosition()
 
         reward = self._calcExpectedReturn() / self._calcVolatilityLevel()
 
@@ -259,7 +257,7 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
         else:
             raise ValueError("no valid open position existing")
 
-        start = self.sampleOpen + 1
+        start = self.positionOpen + 1
         end = start + self.SAMPLES_FORWARD_OBSERVE
 
         futureReturns = [typeFactor * (filteredPrice[i] - filteredPrice[i-1]) / filteredPrice[i-1] for i in range(start, end)]
@@ -267,6 +265,104 @@ class CumulativeWeightedOpeningRewarder(Rewarder):
         expectedReturn = sum( [futureReturns[i] * timeWeights[i] for i in range( len(futureReturns) )] )
 
         return expectedReturn
+
+    def _calcVolatilityLevel(self):
+        ''' returns the a level to norm returns over many forex pairs. It's calculated
+            via the mean standard deviation compared to the mean price over the last 480
+            samples. Make sure to ingest these indicator data when using this rewarder!
+
+            OUT             (float)     volatilityLevel
+        '''
+
+        stddev = self.dataset.data["stddev_480"].mean()
+        meanPrice = self.dataset.data["sma_480"].mean()
+
+        return stddev/meanPrice
+
+class StepClosingRewarder(Rewarder):
+    '''
+    Rewarder for actions of separated networks (one network where to decide when to open
+    a position and one for deciding when to close a position).
+
+    Rewards are single step reward, as they used to be cumulated in the dynamic batch
+    using an A2C agent.
+
+    This Rewarder provides rewards for training of an closing agent only.
+    '''
+
+    def __init__(self):
+        super().__init__()
+
+    def getReturnOfInvest(self):
+        ''' calculates the ROI of the trade
+
+            OUT     tradeReturn     (float)     return on invest for this trade in percentages
+        '''
+
+        if self.tradeType == "long":
+            priceOpen = self.dataset.data["price_ask_close"].values[self.positionOpen]
+            priceClose = self.dataset.data["price_bid_close"].values[self.positionClose]
+            typeFactor = 1
+        elif self.tradeType == "short":
+            priceOpen = self.dataset.data["price_bid_close"].values[self.positionOpen]
+            priceClose = self.dataset.data["price_ask_close"].values[self.positionClose]
+            typeFactor = -1
+        else:
+            raise ValueError("no valid open position existing")
+
+        tradeReturn = 100 * typeFactor * (priceClose - priceOpen) / priceOpen
+
+        return tradeReturn
+
+    def _rewardKeepObserving(self):
+        pass
+
+    def _rewardOpenLong(self):
+        ''' sets the parameters after opening a long position '''
+
+        self.tradeType = "long"
+        self.positionOpen = self.dataset.getPosition()
+
+    def _rewardOpenShort(self):
+        ''' sets the parameters after opening a short position '''
+
+        self.tradeType = "short"
+        self.positionOpen = self.dataset.getPosition()
+
+    def _rewardKeepPosition(self):
+        ''' returns the reward for keeping a position '''
+
+        reward = self._getStepReturn()
+
+        return reward
+
+    def _rewardClosePosition(self):
+        ''' returns the reward for closing a position '''
+
+        reward = -self._getStepReturn() # reward missed return or avoided loss
+        self.positionClose = self.dataset.getPosition()
+
+        return reward
+
+    def _getStepReturn(self):
+        ''' calculates the return of one step
+
+            OUT     (float)     step return normalized by the volatility level
+        '''
+
+        if self.tradeType == "long":
+            price = self.dataset.data["price_bid_close"].values
+            typeFactor = 1
+        elif self.tradeType == "short":
+            price = self.dataset.data["price_ask_close"].values
+            typeFactor = -1
+        else:
+            raise ValueError("no valid open position existing")
+
+        position = self.dataset.getPosition()
+        stepReturn = typeFactor * (price[position+1] - price[position]) / price[self.positionOpen]
+
+        return stepReturn / self._calcVolatilityLevel()
 
     def _calcVolatilityLevel(self):
         ''' returns the a level to norm returns over many forex pairs. It's calculated
