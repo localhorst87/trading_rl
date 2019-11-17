@@ -26,3 +26,10 @@ With the estimation of the mean and variance you can calculate the probability t
 ![win probability](https://latex.codecogs.com/svg.latex?P_{win}&space;=1-&space;\frac{1}{2}&space;(1&space;&plus;&space;erf(\frac{-\mu}{\sqrt{2\sigma^2}})))
 
 The reward is calculated with a cumulative weighted sum of each win per bar, beginning from the opening bar to an amount of bars in the future. The closer the bar to the opening, the heigher the weight...
+
+`ClosingAgent`
+
+On the contrary to open a position, where it is more important to approximate the quality of states to open a position with the highest probability to gain reward, when closing a position it is important to follow a complete strategy after open a position. Therefore we try to make use of complete trajectories of actions. In addition, we still want to keep control of the risk. Therefore, an Advantage Actor-Critic (A2C) agent offers a convenient solution, as we train complete trajectories and at the end our policy approximation returns probabilities of actions. As the history of our trading behavior inside an open position is of importance, LSTMs offer great built-in recurrent networks to implement into the A2C agent.
+To reward an action, the ROI of the respective step is calculated and normed with a volatility factor. The trading time span can be controlled via the discount factor when cumulating the rewards for the critic (high values for long-term strategy and low values for short-term strategy).
+For trading we don't want randomized actions, as the success of a trade is highly dependent on two single actions (open and close the position). Therefore use stochastic action selection only for training the agent. To control the risk we make use of a deterministic action selection, e.g. "if the actor probability to close a position is over 60%, then close the position, else keep the position."
+Training example for ClosingAgent will follow the next days.
