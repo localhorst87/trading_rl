@@ -213,3 +213,13 @@ class Dataset:
         OUT             (bool)      if true, then window was the last window. no more iterations possible'''
 
         return self.getPosition() == self.length - 1
+
+def smoothData(self, dataframe, averageSize):
+    ''' smoothes the data in the dataframe according to a moving average and keeps the original data size
+
+        IN  dataframe       (pandas.dataframe)      the dataframe with the data to smooth
+        IN  averageSize     (int)                   the size of the rolling window
+        OUT                 (pandas.dataframe)      smoothed dataframe
+    '''
+
+    return dataframe.rolling(averageSize, min_periods = 1 , center = True).mean()
