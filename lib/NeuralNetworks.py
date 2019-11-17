@@ -466,19 +466,15 @@ class LstmA2C(Network):
     def buildNetwork(self):
 
         self.input = tf.placeholder(tf.float32, shape = self.inputShape) # shape [batch size, number of features, sequence length]
-        cleanInput = tf.where(tf.is_nan(self.input), tf.zeros_like(self.input), self.input) # same as self.input but with NaN replaced with 0 to not cause training error
-        inputTransposed = tf.transpose(cleanInput, [0, 2, 1]) # transpose input because we have a standardized input shape in the agent
+        inputTransposed = tf.transpose(self.input, [0, 2, 1]) # transpose input because we have a standardized input shape in the agent
         sequenceLength = self._getSequenceLength(inputTransposed)
+        cleanInput = tf.where(tf.is_nan(inputTransposed), tf.zeros_like(inputTransposed), inputTransposed) # same as self.input but with NaN replaced with 0 to not cause training error
 
         lstmCellLong = tf.nn.rnn_cell.LSTMCell(16, name = "CA_lstmCellLong")
         lstmCellShort = tf.nn.rnn_cell.LSTMCell(16, name = "CA_lstmCellShort")
 
-        #batchSize = self.input.get_shape()[0]
-        #initStateLong = lstmCellLong.zero_state(batchSize, tf.float32)
-        #initStateShort = lstmCellShort.zero_state(batchSize, tf.float32)
-
-        outputLong, _ = tf.nn.dynamic_rnn(cell = lstmCellLong, inputs = inputTransposed, sequence_length = sequenceLength, dtype = tf.float32) # shape [batch size, sequence length, LSTM units]
-        outputShort, _ = tf.nn.dynamic_rnn(cell = lstmCellShort, inputs = inputTransposed, sequence_length = sequenceLength, dtype = tf.float32)
+        outputLong, _ = tf.nn.dynamic_rnn(cell = lstmCellLong, inputs = cleanInput, sequence_length = sequenceLength, dtype = tf.float32) # shape [batch size, sequence length, LSTM units]
+        outputShort, _ = tf.nn.dynamic_rnn(cell = lstmCellShort, inputs = cleanInput, sequence_length = sequenceLength, dtype = tf.float32)
 
         outputIndices = tf.expand_dims(sequenceLength-1, axis = -1)
         lastOutputLong = tf.batch_gather(outputLong, outputIndices) # we are interested only in the last output, shape [1, batch size, LSTM Units]
