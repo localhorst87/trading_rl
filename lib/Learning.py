@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from Environment import *
 from NeuralNetworks import *
+from DataProvider import *
 import math
 import tensorflow as tf
 import pickle
@@ -48,10 +49,10 @@ class Agent(ABC):
             except KeyboardInterrupt:
                 raise
 
-            '''except:
+            except:
                 print("error occured")
                 reward = None
-                lastAction = None'''
+                lastAction = None
 
             self.episode += 1
 
@@ -372,19 +373,20 @@ class ClosingAgent(Agent):
             learningRate            (float)         learning Rate for training
             discountFactor          (float)         (0...1) discount factor for calculating the Q value
             minStepsKeepPosition    (int)           number of steps the position will be kept at least
+            probabilityThreshold    (float)         the threshold the "close_position" probability must exceed to close the position when using a deterministic strategy
 
     '''
 
     def __init__(self, environment):
         super().__init__()
         self._learningRate = 1e-3
-        self.discountFactor = 0.95
-        self.replayMemory = ReplayMemory(10000) # use preprocessed samples only (this is on-policy)
-        self.batchSize = 256
+        self.discountFactor = 0.97
+        self.replayMemory = ReplayMemory(50000) # use preprocessed samples only (this is on-policy)
+        self.batchSize = 512
         self._stepSizeTraining = 20
         self._tradeType = None
         self._trainingActive = False
-        self.strategy = "deterministic"
+        self.strategy = "deterministic" # "deterministic" or "stochastic"
         self.probabilityThreshold = 0.60
         self._environment = environment # important: This is a reference, so one environment can be used sequentially in an opening and closing agent
         self._minStepsLeft = 1 # abort episode after this number of (or less) remaining steps to close the position
@@ -392,7 +394,7 @@ class ClosingAgent(Agent):
         self._possibleActions = self.environment.actionSpace.possibleActions["open_position"]
         self._nClosingActions = len(self._possibleActions)
         self._episodeSamples = []
-        self._nInputs = 2 # number of signals as input
+        self._nInputs = 3 # number of signals as input
         self._createNetworks()
 
     def _createNetworks(self):
@@ -564,29 +566,24 @@ class ClosingAgent(Agent):
             nPoints = windowLength
 
         rsi = (observation["rsi_18"][windowLength-nPoints:] - 50) / 100
-        rsi = self._smoothData(rsi, 3)
+        rsi = smoothData(rsi, 3)
         rsi = rsi.values.tolist()
 
-        macdLine = 100 * (observation["sma_12"][:nPoints] - observation["sma_36"][:nPoints]) / observation["sma_480"][:nPoints]
-        macdLine= self._smoothData(macdLine, 3)
-        macdLine= macdLine.values.tolist()
+        macdLineSlow = 100 * (observation["sma_36"][:nPoints] - observation["sma_84"][:nPoints]) / observation["sma_480"][:nPoints]
+        macdLineSlow = smoothData(macdLineSlow, 3)
+        macdLineSlow = macdLineSlow.values.tolist()
+
+        macdLineMedium = 100 * (observation["sma_12"][:nPoints] - observation["sma_36"][:nPoints]) / observation["sma_480"][:nPoints]
+        macdLineMedium = smoothData(macdLineMedium, 3)
+        macdLineMedium = macdLineMedium.values.tolist()
 
         # fill the rest of the data points with None values
         filler = [None] * (windowLength-nPoints)
         rsi.extend(filler)
-        macdLine.extend(filler)
+        macdLineSlow.extend(filler)
+        macdLineMedium.extend(filler)
 
-        return [rsi, macdLine] # return lists and not numpy arrays as numpy uses an own specified memory allocator. Memory consumption can increase vast then when using replay memories!
-
-    def _smoothData(self, dataframe, averageSize):
-        ''' smoothes the data in the dataframe according to a moving average and keeps the original data size
-
-            IN  dataframe       (pandas.dataframe)      the dataframe with the data to smooth
-            IN  averageSize     (int)                   the size of the rolling window
-            OUT                 (pandas.dataframe)      smoothed dataframe
-        '''
-
-        return dataframe.rolling(averageSize, min_periods = 1 , center = True).mean()
+        return [rsi, macdLineSlow, macdLineMedium] # return lists and not numpy arrays as numpy uses an own specified memory allocator. Memory consumption can increase vast then when using replay memories!
 
     def _preprocessSamples(self):
         ''' prepares the reversed Q value calculation for training '''
