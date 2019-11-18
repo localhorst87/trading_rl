@@ -214,7 +214,7 @@ class Dataset:
 
         return self.getPosition() == self.length - 1
 
-def smoothData(self, dataframe, averageSize):
+def smoothData(dataframe, averageSize):
     ''' smoothes the data in the dataframe according to a moving average and keeps the original data size
 
         IN  dataframe       (pandas.dataframe)      the dataframe with the data to smooth
