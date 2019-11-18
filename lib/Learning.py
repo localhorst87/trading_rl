@@ -379,18 +379,19 @@ class ClosingAgent(Agent):
 
     def __init__(self, environment):
         super().__init__()
-        self._learningRate = 1e-3
-        self.discountFactor = 0.97
-        self.replayMemory = ReplayMemory(50000) # use preprocessed samples only (this is on-policy)
-        self.batchSize = 512
-        self._stepSizeTraining = 20
+        self._learningRate = 5e-4
+        self.discountFactor = 0.95
+        self.replayMemory = ReplayMemory(20000) # use preprocessed samples only (this is on-policy)
+        self.batchSize = 1024
+        self._stepSizeTraining = 25
         self._tradeType = None
         self._trainingActive = False
         self.strategy = "deterministic" # "deterministic" or "stochastic"
-        self.probabilityThreshold = 0.60
+        self.probabilityThreshold = 0.55
         self._environment = environment # important: This is a reference, so one environment can be used sequentially in an opening and closing agent
         self._minStepsLeft = 1 # abort episode after this number of (or less) remaining steps to close the position
         self.minStepsKeepPosition = 5 # wait at least this number of steps until closing a position
+        self._maxLengthInput = self.environment.SAMPLE_LENGTH - self.environment.windowLength
         self._possibleActions = self.environment.actionSpace.possibleActions["open_position"]
         self._nClosingActions = len(self._possibleActions)
         self._episodeSamples = []
@@ -403,7 +404,7 @@ class ClosingAgent(Agent):
             positions.
         '''
 
-        inputShape = [None, self._nInputs, self.environment.windowLength]
+        inputShape = [None, self._nInputs, self._maxLengthInput]
         network = LstmA2C("positionNet", inputShape, self._nClosingActions)
         self.networkHandler = A2CHandler(network, self.session, self.graph)
 
@@ -414,9 +415,12 @@ class ClosingAgent(Agent):
         if self.replayMemory.getLength() >= self.batchSize: self.trainingActive = True
 
         self._setTradeTypeNumber() # sets the identifier of the current trade type (0 = long, 1 = short)
+        self.environment.dataset.returnMode = "aggregate" # switch to returning an aggregating window, instead of a moving window
+
         observation = self.environment.dataset.getCurrentWindow()
         state = self._createInput(observation)
         tradingState = "open_position"
+
         self._episodeSamples = []
 
         while tradingState == "open_position" and self.environment.dataset.getRemainingSteps() > self._minStepsLeft:
@@ -558,27 +562,23 @@ class ClosingAgent(Agent):
             OUT                     (list)                  states that can be used as an input for the LSTM network
         '''
 
-        windowLength = self.environment.dataset.windowLength
+        maxLength = self._maxLengthInput
 
-        if windowLength > self.episode + 1: # use only the data points after opening the position!
-            nPoints = self.episode + 1
-        else:
-            nPoints = windowLength
-
-        rsi = (observation["rsi_18"][windowLength-nPoints:] - 50) / 100
+        rsi = (observation["rsi_18"][:maxLength] - 50) / 100
         rsi = smoothData(rsi, 3)
         rsi = rsi.values.tolist()
 
-        macdLineSlow = 100 * (observation["sma_36"][:nPoints] - observation["sma_84"][:nPoints]) / observation["sma_480"][:nPoints]
+        macdLineSlow = 100 * (observation["sma_36"][:maxLength] - observation["sma_84"][:maxLength]) / observation["sma_480"][:maxLength]
         macdLineSlow = smoothData(macdLineSlow, 3)
         macdLineSlow = macdLineSlow.values.tolist()
 
-        macdLineMedium = 100 * (observation["sma_12"][:nPoints] - observation["sma_36"][:nPoints]) / observation["sma_480"][:nPoints]
+        macdLineMedium = 100 * (observation["sma_12"][:maxLength] - observation["sma_36"][:maxLength]) / observation["sma_480"][:maxLength]
         macdLineMedium = smoothData(macdLineMedium, 3)
         macdLineMedium = macdLineMedium.values.tolist()
 
         # fill the rest of the data points with None values
-        filler = [None] * (windowLength-nPoints)
+        nPoints = len(rsi)
+        filler = [None] * (maxLength-nPoints)
         rsi.extend(filler)
         macdLineSlow.extend(filler)
         macdLineMedium.extend(filler)
