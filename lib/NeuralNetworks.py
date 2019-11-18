@@ -407,6 +407,7 @@ class LstmA2C(Network):
         self._output = None
         self._input = None
         self._nOutputs = nActions
+        self._hiddenSize = 64
 
     @property
     def networkName(self):
@@ -470,8 +471,8 @@ class LstmA2C(Network):
         sequenceLength = self._getSequenceLength(inputTransposed)
         cleanInput = tf.where(tf.is_nan(inputTransposed), tf.zeros_like(inputTransposed), inputTransposed) # same as self.input but with NaN replaced with 0 to not cause training error
 
-        lstmCellLong = tf.nn.rnn_cell.LSTMCell(16, name = "CA_lstmCellLong")
-        lstmCellShort = tf.nn.rnn_cell.LSTMCell(16, name = "CA_lstmCellShort")
+        lstmCellLong = tf.nn.rnn_cell.LSTMCell(self._hiddenSize, name = "CA_lstmCellLong")
+        lstmCellShort = tf.nn.rnn_cell.LSTMCell(self._hiddenSize, name = "CA_lstmCellShort")
 
         outputLong, _ = tf.nn.dynamic_rnn(cell = lstmCellLong, inputs = cleanInput, sequence_length = sequenceLength, dtype = tf.float32) # shape [batch size, sequence length, LSTM units]
         outputShort, _ = tf.nn.dynamic_rnn(cell = lstmCellShort, inputs = cleanInput, sequence_length = sequenceLength, dtype = tf.float32)
