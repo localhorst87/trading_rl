@@ -139,6 +139,7 @@ class Dataset:
         self.data = dataframe
         self.length = len(dataframe)
         self.windowLength = windowLength
+        self._returnMode = "window"
         self.nIteration = 0
 
     def __iter__(self):
@@ -181,9 +182,12 @@ class Dataset:
 
             OUT         (pandas.dataframe)      dataframe window of the current iteration
         '''
-
-        start = self.nIteration - 1
-        end = start + self.windowLength
+        if self.returnMode == "window":
+            start = self.nIteration - 1
+            end = start + self.windowLength
+        elif self.returnMode == "aggregate":
+            start = self.positionAggregateStart
+            end = self.getPosition() + 1
 
         return self.data[start:end]
 
@@ -213,6 +217,19 @@ class Dataset:
         OUT             (bool)      if true, then window was the last window. no more iterations possible'''
 
         return self.getPosition() == self.length - 1
+
+    @property
+    def returnMode(self):
+        return self._returnMode
+
+    @returnMode.setter
+    def returnMode(self, value):
+        if (value != "window" and value != "aggregate"): raise ValueError("returnMode %s not allowed, only window or aggregate" % value)
+
+        if self.returnMode == "window" and value == "aggregate":
+            self.positionAggregateStart = self.getPosition() # set new start position for data aggregation if changing from window to aggregate
+
+        self._returnMode = value
 
 def smoothData(dataframe, averageSize):
     ''' smoothes the data in the dataframe according to a moving average and keeps the original data size
